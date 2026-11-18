@@ -41,7 +41,7 @@ export function ProjectPage({ id }: { id: string }) {
   const root = roots.data?.find((r) => r.id === p.root_id);
   // without the root (still loading, or gone) the trail starts at the first folder
   const trail = folderCrumbs(p.root_id, root?.path ?? '', p.rel_path).slice(root || !p.rel_path ? 0 : 1);
-  const imageCount =p.files.filter((f) => f.kind === 'image').length + (pictures.data?.length ?? 0);
+  const imageCount = p.files.filter((f) => f.kind === 'image').length + (pictures.data?.length ?? 0);
   const summary: ProjectSummary = { id: p.id, root_id: p.root_id, rel_path: p.rel_path, title: p.title, creator: p.creator, tags: p.tags, thumbnail: p.thumbnail, file_count: p.files.length, model_count: p.model_count, total_bytes: p.total_bytes, modified: p.modified, has_sidecar: p.sidecar.state === 'ok', offline: p.offline, favorite: p.favorite, added: p.added, thumb: p.thumb, slicer: p.slicer, packed: p.packed };
   return (
     <div className="h-full overflow-auto" data-testid="project-page">
