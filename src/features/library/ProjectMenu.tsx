@@ -1,6 +1,7 @@
-import { Archive, Eye, FolderHeart, FolderInput, FolderMinus, FolderOpen, ImageUp, PackageOpen, Pencil, Plus, Star, StarOff, Trash2 } from 'lucide-react';
+import { Archive, Eye, FolderHeart, FolderInput, FolderMinus, FolderOpen, Globe, ImageUp, PackageOpen, Pencil, Plus, Star, StarOff, Trash2 } from 'lucide-react';
 import { useTranslation } from 'react-i18next';
 import { ContextMenu, ContextMenuContent, ContextMenuItem, ContextMenuSeparator, ContextMenuSub, ContextMenuSubContent, ContextMenuSubTrigger, ContextMenuTrigger } from '@/components/ui/context-menu';
+import { useSourceUpdate } from '@/features/library/SourceUpdateDialog';
 import type { Collection, ProjectSummary } from '@/lib/types';
 
 /** Actions a card, a row or the inspector can trigger; implemented once in `useProjectActions`. */
@@ -63,6 +64,7 @@ export function ProjectMenu({ project: p, selection = [], actions, children }: {
         <ContextMenuItem disabled={movable.length === 0} onSelect={() => actions.move(movable)} data-testid="menu-move"><FolderInput />{t('actions.moveN', { count: n })}</ContextMenuItem>
         {!many && <ContextMenuItem disabled={p.offline} onSelect={() => actions.reveal(p)}><FolderOpen />{t('inspector.reveal')}</ContextMenuItem>}
         <ContextMenuItem disabled={targets.every((x) => x.offline)} onSelect={() => { for (const x of targets) if (!x.offline) actions.rerenderThumbnail(x); }} data-testid="menu-rethumb"><ImageUp />{t('actions.rerenderN', { count: n })}</ContextMenuItem>
+        {many && <ContextMenuItem disabled={targets.every((x) => x.offline)} onSelect={() => useSourceUpdate.getState().open(targets)} data-testid="menu-source-update"><Globe />{t('sourceUpdate.action')}</ContextMenuItem>}
         {packable.length > 0 && <ContextMenuItem onSelect={() => actions.pack(packable)} data-testid="menu-pack"><Archive />{t('actions.packN', { count: packable.length })}</ContextMenuItem>}
         {unpackable.length > 0 && <ContextMenuItem onSelect={() => actions.unpack(unpackable)} data-testid="menu-unpack"><PackageOpen />{t('actions.unpackN', { count: unpackable.length })}</ContextMenuItem>}
         <ContextMenuSeparator />

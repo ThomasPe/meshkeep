@@ -9,6 +9,7 @@ import { Input } from '@/components/ui/input';
 import { ScrollArea } from '@/components/ui/scroll-area';
 import type { ProjectActions } from '@/features/library/ProjectMenu';
 import { SuggestDialog } from '@/features/library/SuggestDialog';
+import { useSourceUpdate } from '@/features/library/SourceUpdateDialog';
 import { TagEditor } from '@/features/library/TagEditor';
 import { HintChips } from '@/features/library/HintChips';
 import { Thumb } from '@/features/library/Thumb';
@@ -87,6 +88,7 @@ export function Inspector({ selectedIds, visible, tagCounts, facets, filterTitle
               ? <Button size="sm" variant="outline" onClick={() => actions.setFavoriteMany(sel, false)} data-testid="multi-unfavorite"><StarOff />{t('inspector.unfavoriteAll')}</Button>
               : <Button size="sm" variant="outline" onClick={() => actions.setFavoriteMany(sel, true)} data-testid="multi-favorite"><Star />{t('inspector.favoriteAll')}</Button>}
             <Button size="sm" variant="outline" onClick={() => actions.move(sel)} data-testid="multi-move"><FolderInput />{t('actions.move')}</Button>
+            <Button size="sm" variant="outline" onClick={() => useSourceUpdate.getState().open(sel)} data-testid="multi-source-update"><Globe />{t('sourceUpdate.action')}</Button>
             <Button size="sm" variant="destructive" onClick={() => actions.removeMany(sel)} data-testid="multi-delete"><Trash2 />{t('inspector.deleteSelected')}</Button>
           </div>
           <Section title={t('library.selected', { count: sel.length })}>

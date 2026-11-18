@@ -12,6 +12,7 @@ import { InboxView } from '@/features/library/InboxView';
 import { Inspector } from '@/features/library/Inspector';
 import { ProjectGrid } from '@/features/library/ProjectGrid';
 import { ProjectList } from '@/features/library/ProjectList';
+import { SourceUpdateDialog } from '@/features/library/SourceUpdateDialog';
 import { Toolbar } from '@/features/library/Toolbar';
 import { useLibraryActions } from '@/features/library/useLibraryActions';
 import { useProjectActions } from '@/features/library/useProjectActions';
@@ -121,6 +122,7 @@ export function LibraryPage({ scanning, onScanEnd }: { scanning: ScanState; onSc
   return (
     <Group orientation="horizontal" className="h-full" elementRef={groupRef} onLayoutChanged={(l) => savePanels(LAYOUT_KEY, ['inspector'], l, groupRef.current?.clientWidth ?? 0)} data-testid="library">
       {dialogs}
+      <SourceUpdateDialog />
       <CollectionDialogs onCreated={(id, addIds) => { if (addIds?.length) addTo.mutate({ id, projectIds: addIds }, { onError: reportError }); }} />
       <Panel id="main" minSize={360} className="min-w-0">
       {/* the one column never grows past the panel: a wide child (the list's table) scrolls

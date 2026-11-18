@@ -758,5 +758,32 @@
     "fetched": "Seiten gelesen: {{fetched}} geladen, {{cached}} aus dem Cache, {{noLink}} Projekte ohne Link",
     "fetchFailed_one": "{{count}} Seite konnte nicht geladen werden",
     "fetchFailed_other": "{{count}} Seiten konnten nicht geladen werden"
+  },
+  "sourceUpdate": {
+    "action": "Von der Quellseite aktualisieren…",
+    "title_one": "{{count}} Projekt von seiner Quellseite aktualisieren",
+    "title_other": "{{count}} Projekte von ihren Quellseiten aktualisieren",
+    "body": "Liest die Modellseite, die jedes Projekt als Quelle verlinkt, und schreibt deren Angaben in project.yaml. Die Projekte werden nacheinander bearbeitet, eine Anfrage pro Sekunde.",
+    "what": "Was aktualisiert wird",
+    "metadata": "Metadaten",
+    "metadataNote": "Ersteller, Lizenz, Beschreibung und Tags; der Titel nur beim Überschreiben.",
+    "image": "Vorschaubild",
+    "how": "Vorhandene Werte",
+    "fill": "Nur leere Felder füllen",
+    "fillNote": "Was ein Projekt schon hat, bleibt unberührt, auch eine selbst gewählte Vorschau.",
+    "overwrite": "Mit der Seite überschreiben",
+    "overwriteNote": "Titel, Ersteller, Lizenz, Beschreibung und Vorschau werden durch die Angaben der Seite ersetzt. Tags werden ergänzt, nie entfernt.",
+    "start": "Aktualisieren",
+    "progress": "{{done}} von {{total}}",
+    "cancelling": "Stoppt nach dem aktuellen Projekt…",
+    "totals": "{{updated}} aktualisiert · {{skipped}} übersprungen · {{failed}} fehlgeschlagen",
+    "conflict": "project.yaml hat sich inzwischen auf der Festplatte geändert; nichts wurde überschrieben.",
+    "partly": "Bereits geschrieben: {{fields}}.",
+    "skip": {
+      "no_link": "Kein Quell-Link",
+      "offline": "Bibliotheksordner ist offline",
+      "nothing_new": "Nichts Neues auf der Seite",
+      "cancelled": "Abgebrochen, bevor es an der Reihe war"
+    }
   }
 }
