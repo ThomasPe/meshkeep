@@ -1548,3 +1548,142 @@ fn every_model_file_gets_its_own_preview() {
     assert!(stranger.is_file());
     assert!(engine.thumbnail_path(&solo_key).unwrap().is_file());
 }
+
+fn plain_deleter(engine: &mut Engine) {
+    engine.set_deleter(Box::new(
+        |p: &Path| if p.is_dir() { fs::remove_dir_all(p) } else { fs::remove_file(p) },
+    ));
+}
+
+/// #71: packing leaves no empty folder behind, and touches nothing else.
+#[test]
+fn packing_removes_empty_folders_and_only_those() {
+    let data = tempfile::tempdir().unwrap();
+    let lib = tempfile::tempdir().unwrap();
+    let elsewhere = tempfile::tempdir().unwrap();
+    let kit = lib.path().join("Kit");
+    touch(&kit.join("kit.stl"), 300);
+    touch(&kit.join("parts/left/a.stl"), 400);
+    touch(&kit.join("parts/right/deep/b.stl"), 500);
+    touch(&kit.join("mixed/c.stl"), 600);
+    touch(&kit.join("mixed/notes.txt"), 10);
+    touch(&kit.join("images/photo.jpg"), 20);
+    touch(&kit.join("sliced/kit.gcode"), 30); // ignored by the scanner, not the app's to remove
+    fs::create_dir_all(kit.join("was/empty/before")).unwrap();
+    // empty folders inside what the scanner skips are not the pack's business
+    fs::create_dir_all(kit.join(".git/refs/tags")).unwrap();
+    fs::create_dir_all(kit.join(".cache/thumbs")).unwrap();
+    // nor is anything outside the project
+    touch(&lib.path().join("Other/other.stl"), 100);
+    fs::create_dir_all(lib.path().join("Other/hollow")).unwrap();
+    fs::create_dir_all(lib.path().join("Hollow")).unwrap();
+    #[cfg(unix)]
+    std::os::unix::fs::symlink(elsewhere.path(), kit.join("link")).unwrap();
+
+    let mut engine = Engine::open(data.path()).unwrap();
+    plain_deleter(&mut engine);
+    let root = engine.add_root(lib.path(), SyncMode::Manual).unwrap();
+    engine.scan_root(&root.id, |_| {}).unwrap();
+    let id = format!("{}:Kit", root.id);
+
+    let (p, notes) = engine.pack_project(&id, &mut |_| {}).unwrap();
+    assert!(notes.is_empty(), "{notes:?}");
+    assert_eq!(p.packed.as_deref(), Some("Kit.zip"));
+
+    assert!(!kit.join("parts").exists(), "nested folders the models left are gone, parents too");
+    assert!(!kit.join("was").exists(), "folders that were empty before go as well");
+    assert!(!kit.join("mixed/c.stl").exists());
+    assert!(kit.join("mixed/notes.txt").is_file(), "a folder with a kept file stays");
+    assert!(kit.join("images/photo.jpg").is_file());
+    assert!(kit.join("sliced/kit.gcode").is_file(), "ignored files keep their folder");
+    assert!(kit.join(".git/refs/tags").is_dir(), "ignored folders are not entered");
+    assert!(kit.join(".cache/thumbs").is_dir(), "nor the app's own");
+    assert!(kit.join("Kit.zip").is_file() && kit.join("project.yaml").is_file());
+    assert!(lib.path().join("Other/hollow").is_dir(), "other projects are untouched");
+    assert!(lib.path().join("Hollow").is_dir());
+    #[cfg(unix)]
+    {
+        assert!(kit.join("link").is_symlink(), "links are neither followed nor removed");
+        assert!(elsewhere.path().is_dir());
+    }
+
+    // a project whose every model sat in subfolders keeps its own folder
+    touch(&lib.path().join("Bundle/files/x.stl"), 100);
+    touch(&lib.path().join("Bundle/stl/y.stl"), 100);
+    engine.scan_root(&root.id, |_| {}).unwrap();
+    let bundle = format!("{}:Bundle", root.id);
+    engine.pack_project(&bundle, &mut |_| {}).unwrap();
+    let left: Vec<String> = fs::read_dir(lib.path().join("Bundle"))
+        .unwrap()
+        .map(|e| e.unwrap().file_name().to_string_lossy().into_owned())
+        .collect();
+    assert_eq!(left.len(), 2, "{left:?}");
+    assert!(left.contains(&"Bundle.zip".to_string()) && left.contains(&"project.yaml".to_string()));
+}
+
+/// #71: a folder that cannot be emptied or removed does not undo the pack.
+#[test]
+fn packing_survives_a_folder_that_cannot_be_removed() {
+    let data = tempfile::tempdir().unwrap();
+    let lib = tempfile::tempdir().unwrap();
+    let kit = lib.path().join("Kit");
+    touch(&kit.join("kit.stl"), 300);
+    touch(&kit.join("parts/left/a.stl"), 400);
+    touch(&kit.join("parts/right/b.stl"), 500);
+
+    let mut engine = Engine::open(data.path()).unwrap();
+    engine.set_deleter(Box::new(|p: &Path| {
+        if p.ends_with("b.stl") {
+            Err(std::io::Error::other("in use"))
+        } else {
+            fs::remove_file(p)
+        }
+    }));
+    let root = engine.add_root(lib.path(), SyncMode::Manual).unwrap();
+    engine.scan_root(&root.id, |_| {}).unwrap();
+    let id = format!("{}:Kit", root.id);
+
+    let (p, notes) = engine.pack_project(&id, &mut |_| {}).unwrap();
+    assert_eq!(notes.len(), 1, "{notes:?}");
+    assert_eq!(p.packed.as_deref(), Some("Kit.zip"));
+    assert!(!kit.join("parts/left").exists());
+    assert!(kit.join("parts/right/b.stl").is_file(), "the file that stayed keeps its folder");
+    assert!(engine.locate(&id, "Kit.zip/parts/right/b.stl").is_ok());
+}
+
+/// #71: the folders a pack removed come back with their files on unpack.
+#[test]
+fn unpacking_restores_the_folders_packing_removed() {
+    let data = tempfile::tempdir().unwrap();
+    let lib = tempfile::tempdir().unwrap();
+    let kit = lib.path().join("Kit");
+    fs::create_dir_all(kit.join("parts/right/deep")).unwrap();
+    fs::create_dir_all(kit.join("parts/left")).unwrap();
+    fs::write(kit.join("kit.stl"), b"solid kit").unwrap();
+    fs::write(kit.join("parts/left/a.stl"), b"solid a").unwrap();
+    fs::write(kit.join("parts/right/deep/b.stl"), b"solid b").unwrap();
+    fs::write(kit.join("readme.txt"), b"hello").unwrap();
+    fs::create_dir_all(kit.join("spare")).unwrap();
+
+    let mut engine = Engine::open(data.path()).unwrap();
+    plain_deleter(&mut engine);
+    let root = engine.add_root(lib.path(), SyncMode::Manual).unwrap();
+    engine.scan_root(&root.id, |_| {}).unwrap();
+    let id = format!("{}:Kit", root.id);
+    let loose: Vec<String> = engine.get_project(&id).unwrap().files.into_iter().map(|f| f.rel_path).collect();
+
+    engine.pack_project(&id, &mut |_| {}).unwrap();
+    assert!(!kit.join("parts").exists() && !kit.join("spare").exists());
+
+    let (p, notes) = engine.unpack_project(&id, false, &mut |_| {}).unwrap();
+    assert!(notes.is_empty(), "{notes:?}");
+    assert_eq!(p.packed, None);
+    let rels: Vec<String> = p.files.into_iter().map(|f| f.rel_path).collect();
+    assert_eq!(rels, loose, "the same files in the same places");
+    assert_eq!(rels, vec!["kit.stl", "parts/left/a.stl", "parts/right/deep/b.stl", "readme.txt"]);
+    assert_eq!(fs::read(kit.join("parts/left/a.stl")).unwrap(), b"solid a");
+    assert_eq!(fs::read(kit.join("parts/right/deep/b.stl")).unwrap(), b"solid b");
+    assert!(!kit.join("Kit.zip").exists());
+    assert!(!kit.join(".meshkeep").exists(), "no staging folder left");
+    assert!(!kit.join("spare").exists(), "a folder that held nothing is not part of the archive");
+}
