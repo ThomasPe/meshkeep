@@ -62,6 +62,7 @@
     "files_other": "{{count}} Dateien",
     "selected_one": "{{count}} ausgewählt",
     "selected_other": "{{count}} ausgewählt",
+    "selectProject": "{{title}} auswählen",
     "columns": {
       "title": "Titel",
       "creator": "Designer",

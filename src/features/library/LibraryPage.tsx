@@ -77,14 +77,19 @@ export function LibraryPage({ scanning, onScanEnd }: { scanning: ScanState; onSc
   const pending = smartId ? smartProjects.isPending : projects.isPending;
   const selectedSet = useMemo(() => new Set(selected), [selected]);
 
+  // An added project goes to the end of the selection, which is where Shift-click takes its
+  // range anchor from; after a removal the anchor is the last one still selected.
+  const onToggle = useCallback((id: string) => {
+    select(selected.includes(id) ? selected.filter((x) => x !== id) : [...selected, id]);
+  }, [select, selected]);
   const onSelect = useCallback((id: string, e: React.MouseEvent) => {
-    if (e.ctrlKey || e.metaKey) select(selected.includes(id) ? selected.filter((x) => x !== id) : [...selected, id]);
+    if (e.ctrlKey || e.metaKey) onToggle(id);
     else if (e.shiftKey && selected.length) {
       const ids = list.map((p) => p.id);
       const a = ids.indexOf(selected[selected.length - 1]!), b = ids.indexOf(id);
       select([...new Set([...selected, ...ids.slice(Math.min(a, b), Math.max(a, b) + 1)])]);
     } else select([id]);
-  }, [select, selected, list]);
+  }, [select, selected, list, onToggle]);
   const onOpen = useCallback((id: string) => navigate({ page: 'project', id }), []);
 
   const rootName = (id: string) => roots.data?.find((r) => r.id === id)?.path.split(/[\\/]/).filter(Boolean).pop() ?? '';
@@ -143,7 +148,7 @@ export function LibraryPage({ scanning, onScanEnd }: { scanning: ScanState; onSc
             </div>
           </div>
         ) : view === 'grid' ? (
-          <ProjectGrid projects={list} tile={tile} selected={selectedSet} onSelect={onSelect} onOpen={onOpen} onTag={toggleTag} actions={actions} onReorder={onReorder} />
+          <ProjectGrid projects={list} tile={tile} selected={selectedSet} onSelect={onSelect} onToggle={onToggle} onOpen={onOpen} onTag={toggleTag} actions={actions} onReorder={onReorder} />
         ) : (
           <ProjectList projects={list} selected={selectedSet} sort={effectiveSort} onSort={setSort} onSelect={onSelect} onOpen={onOpen} onTag={toggleTag} actions={actions} />
         )}
