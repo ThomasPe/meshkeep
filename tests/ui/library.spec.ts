@@ -136,6 +136,54 @@ test('the sidebar stays on the project page; picking a folder there returns to t
   await expect(page.getByTestId('panel-sidebar')).toHaveCount(0);
 });
 
+test('breadcrumbs: every step above the current place navigates there (#73)', async ({ page }) => {
+  const title = page.getByTestId('toolbar').locator('h1');
+  const crumbs = page.getByTestId('crumb');
+  const treeRow = (key: string) => page.locator(`[data-tree-row][data-key="${key}"]`);
+  await page.getByTestId('project-card').filter({ hasText: 'Robotic Arm v4' }).dblclick();
+  const trail = page.getByRole('navigation', { name: 'Breadcrumb' });
+  await expect(trail).toBeVisible();
+  // root and folders are buttons, the project's own folder is where we are
+  await expect(crumbs).toHaveText(['D:\\3D Models', 'Projects', 'Robotics']);
+  await expect(trail.locator('[aria-current="page"]')).toHaveText(/Arm v4$/);
+  await expect(trail.locator('[aria-current="page"]').getByRole('button')).toHaveCount(0);
+  // with its parent collapsed the folder is not in the tree until a step leads into it
+  await treeRow('r1:Projects').getByRole('button', { name: 'collapse' }).click();
+  await expect(treeRow('r1:Projects/Robotics')).toHaveCount(0);
+
+  // by keyboard: the folder step returns to the library with that folder selected and revealed
+  await crumbs.filter({ hasText: 'Robotics' }).focus();
+  await page.keyboard.press('Enter');
+  await expect(page.getByTestId('library')).toBeVisible();
+  await expect(title).toHaveText('Robotics');
+  await expect(treeRow('r1:Projects/Robotics')).toBeVisible();
+  await expect(treeRow('r1:Projects/Robotics')).toHaveAttribute('aria-selected', 'true');
+  await expect(page.getByTestId('project-card').filter({ hasText: 'Robotic Arm v4' })).toBeVisible();
+
+  // in the library the folders above the selected one lead back up; the title is the current step
+  await expect(crumbs).toHaveText(['3D Models', 'Projects']);
+  await expect(page.getByTestId('crumb-current')).toHaveAttribute('aria-current', 'page');
+  await expect(page.getByTestId('crumb-current').locator('h1')).toHaveText('Robotics');
+  const inRobotics = Number(await page.getByTestId('result-count').textContent());
+  await crumbs.filter({ hasText: 'Projects' }).click();
+  await expect(title).toHaveText('Projects');
+  await expect(treeRow('r1:Projects')).toHaveAttribute('aria-selected', 'true');
+  await expect(crumbs).toHaveText(['3D Models']);
+  expect(Number(await page.getByTestId('result-count').textContent())).toBeGreaterThan(inRobotics);
+  await crumbs.click();
+  await expect(title).toHaveText('3D Models');
+  await expect(page.getByTestId('root-row').first()).toHaveAttribute('aria-selected', 'true');
+  // a root has nothing above it: a plain title, no trail
+  await expect(page.getByTestId('breadcrumbs')).toHaveCount(0);
+
+  // the root step of a project's trail selects the root
+  await page.getByTestId('project-card').filter({ hasText: 'Robotic Arm v4' }).dblclick();
+  await expect(page.getByTestId('project-page')).toBeVisible();
+  await crumbs.filter({ hasText: '3D Models' }).click();
+  await expect(page.getByTestId('library')).toBeVisible();
+  await expect(title).toHaveText('3D Models');
+});
+
 test('settings: the model-page switch is off by default and its state is explained', async ({ page }) => {
   await page.getByTestId('nav-settings').click();
   const status = page.getByTestId('fetch-pages-status');

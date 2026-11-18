@@ -15,6 +15,7 @@ import { ProjectList } from '@/features/library/ProjectList';
 import { Toolbar } from '@/features/library/Toolbar';
 import { useLibraryActions } from '@/features/library/useLibraryActions';
 import { useProjectActions } from '@/features/library/useProjectActions';
+import { folderCrumbs } from '@/lib/crumbs';
 import { reportError } from '@/lib/errors';
 import { useAddToCollection, useCollections, useFacets, useProjects, useReorderCollection, useRoots, useSmartCollections, useSmartProjects, useTagCounts } from '@/lib/queries';
 import { navigate } from '@/lib/router';
@@ -99,6 +100,8 @@ export function LibraryPage({ scanning, onScanEnd }: { scanning: ScanState; onSc
     : filter.kind === 'collection' ? collections.data?.find((c) => c.id === filter.id)?.name ?? ''
     : filter.kind === 'smart' ? smart.data?.find((c) => c.id === filter.id)?.name ?? ''
     : rootName(filter.rootId);
+  // the folders above the selected one, each a way back up (#73); the folder itself is the title
+  const crumbs = filter.kind === 'folder' ? folderCrumbs(filter.rootId, rootName(filter.rootId), filter.path).slice(0, -1) : undefined;
   const activeRoot = rootScoped ? filter.rootId : roots.data?.[0]?.id;
   const filtered = tags.length > 0 || !!text || !!creator || !!license || !!material || !!fileType;
   const single = selected.length === 1 ? list.find((p) => p.id === selected[0]) : undefined;
@@ -126,7 +129,7 @@ export function LibraryPage({ scanning, onScanEnd }: { scanning: ScanState; onSc
       {/* the one column never grows past the panel: a wide child (the list's table) scrolls
           inside itself instead of pushing the toolbar and the whole panel sideways (#64) */}
       <main className="grid h-full min-h-0 grid-cols-[minmax(0,1fr)] grid-rows-[auto_minmax(0,1fr)]" onKeyDown={onKey}>
-        <Toolbar title={filterTitle} count={special ? 0 : list.length} onRescan={activeRoot && !special ? () => void scan(activeRoot) : undefined} scanning={!!activeRoot && activeRoot in scanning} sortLocked={filter.kind === 'recent' || special} onImport={() => void pickImport()} onSaveSmart={filtered && !special && filter.kind !== 'collection' && filter.kind !== 'smart' ? saveSmart : undefined} collectionSort={filter.kind === 'collection'} />
+        <Toolbar title={filterTitle} crumbs={crumbs} count={special ? 0 : list.length} onRescan={activeRoot && !special ? () => void scan(activeRoot) : undefined} scanning={!!activeRoot && activeRoot in scanning} sortLocked={filter.kind === 'recent' || special} onImport={() => void pickImport()} onSaveSmart={filtered && !special && filter.kind !== 'collection' && filter.kind !== 'smart' ? saveSmart : undefined} collectionSort={filter.kind === 'collection'} />
         {filter.kind === 'creators' ? (
           <CreatorSuggestionsView />
         ) : filter.kind === 'duplicates' ? (
