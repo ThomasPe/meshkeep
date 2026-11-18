@@ -211,12 +211,23 @@ export const useDeleteSmartCollection = () => useCollectionMutation((b, id: stri
 export const useProjectHints = (id: string | null, enabled = true) => useQuery({ queryKey: ['hints', id ?? ''], queryFn: async () => (await getBackend()).projectHints(id!), enabled: !!id && enabled, staleTime: 60_000 });
 export const useCreatorSuggestions = (enabled: boolean) => useQuery({ queryKey: ['creatorSuggestions'], queryFn: async () => (await getBackend()).creatorSuggestions(), enabled, staleTime: 30_000 });
 
+type MoveArgs = { projectIds: string[]; rootId: string; destRel: string };
+const afterMove = (qc: QueryClient, report: { moved: { id: string }[] }, a: MoveArgs) => { const kept = new Set(report.moved.map((p) => p.id)); for (const id of a.projectIds) if (!kept.has(id)) qc.removeQueries({ queryKey: keys.project(id) }); invalidateLibrary(qc); };
 export function useMoveProjects() {
   const qc = useQueryClient();
   return useMutation({
-    mutationFn: async (a: { projectIds: string[]; rootId: string; destRel: string }) => (await getBackend()).moveProjects(a.projectIds, a.rootId, a.destRel),
-    onSuccess: (report, a) => { const kept = new Set(report.moved.map((p) => p.id)); for (const id of a.projectIds) if (!kept.has(id)) qc.removeQueries({ queryKey: keys.project(id) }); invalidateLibrary(qc); },
+    mutationFn: async (a: MoveArgs) => (await getBackend()).moveProjects(a.projectIds, a.rootId, a.destRel),
+    onSuccess: (report, a) => afterMove(qc, report, a),
   });
+}
+/**
+ * The same move outside a component's lifetime: the Undo of a toast outlives what offered it
+ * (the details page reads the project again under its new id and drops its dialogs meanwhile).
+ */
+export async function moveProjectsDetached(qc: QueryClient, a: MoveArgs) {
+  const report = await (await getBackend()).moveProjects(a.projectIds, a.rootId, a.destRel);
+  afterMove(qc, report, a);
+  return report;
 }
 
 export function usePromoteInboxEach() {
