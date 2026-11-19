@@ -1275,6 +1275,19 @@ test('folder tree: containers get a folder icon and a count, projects a model ic
   expect(await icon(desk)).not.toBe(await icon(stand));
 });
 
+test('folder tree: rows are ordered alphabetically regardless of case (#74)', async ({ page }) => {
+  // the backend lists names in byte order, where every lowercase name comes after "Z"
+  await page.getByTestId('project-card').filter({ hasText: 'Phone Stand' }).click({ button: 'right' });
+  await page.getByTestId('menu-rename').click();
+  await page.getByTestId('rename-input').fill('bracket 10');
+  await page.getByTestId('rename-confirm').click();
+  await expect(page.getByTestId('rename-dialog')).toBeHidden();
+  await page.locator('[data-tree-row][data-label="Desk"]').getByRole('button', { name: 'expand' }).click();
+  const rows = page.locator('[data-tree-row][data-parent="r1:Projects/Desk"]');
+  await expect(rows).toHaveCount(2);
+  expect(await rows.evaluateAll((els) => els.map((el) => el.getAttribute('data-label')))).toEqual(['bracket 10', 'Cable Clips']);
+});
+
 test('folder tree: a project row opens the project, expansion is remembered', async ({ page }) => {
   const desk = page.locator('[data-tree-row][data-label="Desk"]');
   await desk.getByRole('button', { name: 'expand' }).click();
