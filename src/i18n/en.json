@@ -62,6 +62,7 @@
     "files_other": "{{count}} files",
     "selected_one": "{{count}} selected",
     "selected_other": "{{count}} selected",
+    "selectProject": "Select {{title}}",
     "columns": {
       "title": "Title",
       "creator": "Creator",

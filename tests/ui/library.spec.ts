@@ -1331,6 +1331,54 @@ test('move: the dialog moves a project into a folder or a new sub-folder, undo b
   await expect(page.locator('[data-tree-row][data-label="Archive"]')).toContainText('2');
 });
 
+test('check mark on a card adds it to the selection or takes it out, the rest stays (#72)', async ({ page }) => {
+  const cards = page.getByTestId('project-card');
+  const selected = page.locator('[data-testid="project-card"][aria-selected="true"]');
+  const a = cards.filter({ hasText: 'Decorative Vase' });
+  const b = cards.filter({ hasText: 'Dice Tower' });
+  await a.click();
+  await expect(selected).toHaveCount(1);
+  // the check mark of another card adds it, without Ctrl and without opening anything
+  await b.hover();
+  const checkB = b.getByRole('checkbox', { name: 'Select Dice Tower' });
+  await checkB.click();
+  await expect(selected).toHaveCount(2);
+  await expect(a).toHaveAttribute('aria-selected', 'true');
+  await expect(b).toHaveAttribute('aria-selected', 'true');
+  await expect(checkB).toHaveAttribute('aria-checked', 'true');
+  await expect(page.getByTestId('status-selected')).toHaveText('2 selected');
+  // the check mark of a selected card takes only that one out
+  await a.getByTestId('card-select').click();
+  await expect(selected).toHaveCount(1);
+  await expect(b).toHaveAttribute('aria-selected', 'true');
+  await expect(a.getByTestId('card-select')).toHaveAttribute('aria-checked', 'false');
+  // keyboard: Space and Enter toggle once each and neither opens the project
+  await a.getByTestId('card-select').focus();
+  await page.keyboard.press('Space');
+  await expect(selected).toHaveCount(2);
+  await page.keyboard.press('Enter');
+  await expect(selected).toHaveCount(1);
+  await expect(page.getByTestId('library')).toBeVisible();
+  // a double-click on it does not open the project either
+  await a.getByTestId('card-select').dblclick();
+  await expect(page.getByTestId('library')).toBeVisible();
+  await expect(selected).toHaveCount(1);
+  // a plain click on a card still replaces the selection
+  await a.getByTestId('card-select').click();
+  await expect(selected).toHaveCount(2);
+  await cards.filter({ hasText: 'Cable Clips' }).click();
+  await expect(selected).toHaveCount(1);
+  await expect(selected).toContainText('Cable Clips');
+  // the toggled card is the anchor of a following Shift-click range
+  const first = cards.nth(0), third = cards.nth(2);
+  await first.click();
+  await first.getByTestId('card-select').click();
+  await expect(selected).toHaveCount(0);
+  await first.getByTestId('card-select').click();
+  await third.click({ modifiers: ['Shift'] });
+  await expect(selected).toHaveCount(3);
+});
+
 test('context menu: acts on the selection when the clicked card is part of it, else selects that card', async ({ page }) => {
   const cards = page.getByTestId('project-card');
   await cards.filter({ hasText: 'Decorative Vase' }).click();
