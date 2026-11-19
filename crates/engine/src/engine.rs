@@ -2635,6 +2635,8 @@ impl Engine {
             return Err(EngineError::NotAllowed("the project is packed already".into()));
         }
         let dir = self.project_dir(&current)?;
+        let root_path = self.root(&current.root_id)?.path;
+        let ignore = IgnoreMatcher::new(&self.scan_opts.ignore)?;
         let rels: Vec<String> = current
             .files
             .iter()
@@ -2684,7 +2686,9 @@ impl Engine {
                 notes.push(format!("{rel}: packed, but the loose file could not be removed: {e}"));
             }
         }
-        remove_empty_subdirs(&dir);
+        // no empty folders stay behind (#71): the ones the models left, and ones that were
+        // empty before, since unpacking only brings back folders that hold a file
+        remove_empty_subdirs(&dir, &root_path, &ignore);
         self.remove_thumb_files(&current)?;
         self.index.clear_thumb(&current.id)?;
         Ok((self.reindex_dir(&current.root_id, &dir)?, notes))
@@ -2706,6 +2710,8 @@ impl Engine {
             return Err(EngineError::NotAllowed("the project is not packed".into()));
         };
         let dir = self.project_dir(&current)?;
+        let root_path = self.root(&current.root_id)?.path;
+        let ignore = IgnoreMatcher::new(&self.scan_opts.ignore)?;
         let archive = dir.join(&archive_rel);
         let (mut sc, stamp) = match sidecar::read(&dir)? {
             Some((sc, stamp)) => (sc, Some(stamp)),
@@ -2773,7 +2779,7 @@ impl Engine {
             for p in &placed {
                 let _ = std::fs::remove_file(p);
             }
-            remove_empty_subdirs(&dir);
+            remove_empty_subdirs(&dir, &root_path, &ignore);
             return Err(e);
         }
         let mut notes = Vec::new();
@@ -2830,13 +2836,20 @@ impl Engine {
     }
 }
 
-/// Removes directories below `dir` that hold nothing any more (after packing or a rolled
-/// back unpack), deepest first. `dir` itself stays.
-fn remove_empty_subdirs(dir: &Path) {
+/// Removes directories below `dir` that hold nothing at all (after packing or a rolled back
+/// unpack), deepest first, so a parent emptied by its children goes too. `dir` itself stays,
+/// links are not followed, and the app's folders and ignored ones (`.git`, `.meshkeep`, ...)
+/// are not entered: what the scanner leaves alone, this leaves alone. Best effort: a folder
+/// that cannot be removed simply stays.
+fn remove_empty_subdirs(dir: &Path, root: &Path, ignore: &IgnoreMatcher) {
     let mut dirs: Vec<PathBuf> = walkdir::WalkDir::new(dir)
         .min_depth(1)
         .follow_links(false)
         .into_iter()
+        .filter_entry(|e| {
+            let app_owned = e.depth() == 1 && scan::APP_DIRS.iter().any(|d| e.file_name() == *d);
+            !app_owned && !ignore.is_ignored(e.path().strip_prefix(root).unwrap_or(e.path()))
+        })
         .flatten()
         .filter(|e| e.file_type().is_dir())
         .map(|e| e.into_path())
