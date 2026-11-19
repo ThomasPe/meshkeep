@@ -6,12 +6,13 @@ import { Button } from '@/components/ui/button';
 import { Dialog, DialogContent, DialogDescription, DialogFooter, DialogHeader, DialogTitle } from '@/components/ui/dialog';
 import { Input } from '@/components/ui/input';
 import { Label } from '@/components/ui/label';
-import type { ProjectActions } from '@/features/library/ProjectMenu';
+import type { ProjectActions } from '@/features/library/projectActions';
+import { SuggestDialog } from '@/features/library/SuggestDialog';
 import { getBackend } from '@/lib/backend';
 import { formatBytes } from '@/lib/format';
 import { reportError } from '@/lib/errors';
 import { useCollectionDialog } from '@/features/library/CollectionDialogs';
-import { invalidateLibrary, keys, useAddToCollection, useCollections, useDeleteProject, useRemoveFromCollection, useRenameProject, useSetFavorite } from '@/lib/queries';
+import { invalidateLibrary, keys, useAddToCollection, useCollections, useDeleteProject, useProject, useRemoveFromCollection, useRenameProject, useSetFavorite } from '@/lib/queries';
 import { navigate } from '@/lib/router';
 import { MoveDialog } from '@/features/library/MoveDialog';
 import { forgetFileThumbs } from '@/lib/thumbs/files';
@@ -26,6 +27,7 @@ type PackJob = { mode: 'pack' | 'unpack'; targets: ProjectSummary[] };
 /**
  * Project-level actions (favorite, rename, delete, reveal, open) plus the dialogs they need.
  * Render `dialogs` once in the page; pass `actions` to cards, rows, menus and the inspector.
+ * Which of them a surface offers is decided in one place, `projectActionItems`.
  */
 export function useProjectActions(opts: { onRenamed?: (oldId: string, newId: string) => void; onDeleted?: (id: string) => void; collectionId?: string | null } = {}) {
   const { t, i18n } = useTranslation();
@@ -50,6 +52,9 @@ export function useProjectActions(opts: { onRenamed?: (oldId: string, newId: str
   const [deletingMany, setDeletingMany] = useState<Target[]>([]);
   const [moving, setMoving] = useState<Target[]>([]);
   const setCreator = useUi((s) => s.setCreator);
+  // the suggestion dialogs work on the whole project, which is read when one is asked for
+  const [suggesting, setSuggesting] = useState<{ id: string; mode: 'ai' | 'page' } | null>(null);
+  const suggestProject = useProject(suggesting?.id ?? null);
 
   const actions = useMemo<ProjectActions>(() => ({
     open: (p) => navigate({ page: 'project', id: p.id }),
@@ -73,6 +78,7 @@ export function useProjectActions(opts: { onRenamed?: (oldId: string, newId: str
         void kickThumbQueue();
       }).catch(reportError);
     },
+    suggest: (p, mode) => setSuggesting({ id: p.id, mode }),
     addToCollection: (p, cid) => {
       if (cid === null) { openCollectionDialog({ kind: 'create', addProjectIds: [p.id] }); return; }
       addTo.mutate({ id: cid, projectIds: [p.id] }, { onSuccess: (c) => toast.success(t('collections.added', { name: c.name })), onError: reportError });
@@ -173,6 +179,7 @@ export function useProjectActions(opts: { onRenamed?: (oldId: string, newId: str
           </DialogFooter>
         </DialogContent>
       </Dialog>
+      {suggesting && suggestProject.data?.id === suggesting.id && <SuggestDialog project={suggestProject.data} open onOpenChange={(o) => { if (!o) setSuggesting(null); }} mode={suggesting.mode} />}
       <MoveDialog projects={moving} onClose={() => setMoving([])} onMoved={() => { setMoving([]); select([]); }} />
       <Dialog open={!!renaming} onOpenChange={(o) => !o && setRenaming(null)}>
         <DialogContent data-testid="rename-dialog">

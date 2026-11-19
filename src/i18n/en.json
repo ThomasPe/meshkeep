@@ -476,6 +476,7 @@
     "removeN_other": "Remove {{count}} from favorites"
   },
   "actions": {
+    "more": "More actions",
     "rename": "Rename",
     "renameTitle": "Rename project folder",
     "renameBody": "The folder on disk is renamed. Tags and metadata in project.yaml are kept.",

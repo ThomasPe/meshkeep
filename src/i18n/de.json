@@ -476,6 +476,7 @@
     "removeN_other": "{{count}} aus Favoriten entfernen"
   },
   "actions": {
+    "more": "Weitere Aktionen",
     "rename": "Umbenennen",
     "renameTitle": "Projektordner umbenennen",
     "renameBody": "Der Ordner auf der Festplatte wird umbenannt. Tags und Metadaten in der project.yaml bleiben erhalten.",
