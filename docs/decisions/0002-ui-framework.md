@@ -3,6 +3,9 @@
 - Status: **accepted** 2026-10-17 (direction D Gallery); component library decided 2026-10-18: **shadcn/ui on Tailwind CSS 4** (see Decision).
 - Date: 2026-10-17
 - Related: ADR-0001 (shell). Every option below works in Electron and Tauri.
+- Note 2026-11-20: `docs/mockups/` and `docs/clickdummy/` were removed from the repository
+  once the app had implemented direction D. The paths in this record refer to the history,
+  last at commit `b127516`.
 
 ## Context
 
@@ -133,4 +136,5 @@ one vendor and minimal assembly; that is not this project's constraint.
 - The chosen mockup becomes the reference for the "UI foundation" scaffold item: tokens,
   spacing scale, typography and the app shell layout.
 - Mockups are kept as static HTML in `docs/mockups/` for future reference; they are not
-  code to reuse.
+  code to reuse. (Removed on 2026-11-20 together with the click dummy, see the note at
+  the top.)

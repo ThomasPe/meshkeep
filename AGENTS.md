@@ -133,7 +133,7 @@ Browser mode (`npm run dev`, Playwright) uses the mock backend, which synthesize
 
 | Area | Path |
 |---|---|
-| Spec, backlog, ADRs, mockups, click dummy | `docs/` |
+| Spec, backlog, ADRs | `docs/` |
 | Engine | `crates/engine/src/{scan,sidecar,index,watch,roots,collections,settings,import,threemf,thumbs,engine}.rs` |
 | Import staging, inbox, collections UI | `src/features/import/`, `src/features/library/{InboxView,CollectionDialogs}.tsx` |
 | AI assistance | `crates/engine/src/ai.rs`, `src-tauri/src/keys.rs`, `src/features/library/SuggestDialog.tsx`, `AiCard` in `src/features/settings/SettingsPage.tsx` |

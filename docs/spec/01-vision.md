@@ -55,9 +55,10 @@ to a local, offline library.
 | Plex | Library roots, background scanning, automatic enrichment of local media |
 | Thingiverse / MyMiniFactory / MakerWorld / Thangs | Card-based browsing, tags, designer and license metadata, file lists per "thing" |
 
-## Reference mockup
+## Information architecture
 
-`docs/mockups/reference-mockup.png` shows the intended information architecture: a
-sidebar with library views, smart collections and the physical folder tree; a tabbed main
-area with a zoomable thumbnail grid; a status bar with sync state. Interactive HTML
-mockups exploring different visual directions are in `docs/mockups/`.
+A sidebar with library views, smart collections and the physical folder tree; a tabbed
+main area with a zoomable thumbnail grid; a status bar with sync state. The reference
+image and the HTML mockups that explored visual directions (ADR-0002) were removed from
+the repository on 2026-11-20, once the app had implemented them; they remain in the
+history, last at commit `b127516`.
