@@ -160,9 +160,9 @@ submission is outside the code: Partner Center identity values, screenshots
       `packed` for zips (remembered toggle in the dialog), "Pack"/"Unpack" for one project or a
       selection with a progress toast, "open with default app" via a cache copy, MCP
       `pack_projects`/`unpack_projects` and `execute_import` with `packed`. The import's
-      default archive policy is now the trash (Q7). Not yet: packing other files than models,
-      re-using an original archive kept in a project instead of compressing again, progress
-      for MCP clients.
+      default archive policy is now the trash (Q7). MCP clients see progress (#102). Not
+      yet: packing other files than models, re-using an original archive kept in a project
+      instead of compressing again.
 - [x] **Duplicate detection** (LIB-8): size pre-filter, SHA-256 on all cores, hash cache in
       the index (schema v4, survives rescans and renames), identical/overlap groups, Duplicates
       view in the sidebar with keep-one resolution and automatic refresh after changes.
@@ -285,9 +285,13 @@ cost estimate, import proposals in the staging dialog (see ADR-0003, features 4,
       with the user's key, under the same rules (no key no request, documented inputs
       only, validated, cached, never written). The provider call runs outside the engine
       lock.
-- [ ] **Follow-ups.** Progress notifications for long tools (duplicates, imports with
-      pages); an audit view of what agents changed (reuse the undo log once APP-6
-      exists).
+- [x] **Progress for long tools** (#102, ADR-0004 amendment). A `tools/call` with a
+      progress token gets `notifications/progress` from `find_duplicates` (and the tools
+      that hash on the way), `execute_import`, `pack_projects`, `unpack_projects` and
+      `scan_root`. Over HTTP the answer to such a call is an event stream on the same
+      POST (for clients that accept one), over the stdio bridge one line per message.
+- [ ] **Follow-ups.** An audit view of what agents changed (reuse the undo log once APP-6
+      exists); cancelling a running tool.
 
 ## Phase 3: Model tools
 - [ ] **Transforms & mesh analysis** (VIEW-7).

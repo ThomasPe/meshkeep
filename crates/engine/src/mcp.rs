@@ -1,7 +1,8 @@
 //! The MCP server's brain (ADR-0004): JSON-RPC messages in, results out. Transport, token
 //! check and threading live in the shell; this module only knows the engine, so every tool
 //! is testable without a socket. Protocol: MCP 2025-06-18, tools, prompts and resources,
-//! stateless (no session ids, no server-initiated messages).
+//! stateless (no session ids). The one thing the server sends on its own is progress for a
+//! long tool, and only to a request that asked for it with a progress token (#102).
 //!
 //! Tools come in two sets. Reading ones are always on. Writing ones (metadata, imports,
 //! renames, moves, favorites, collections) only exist while "allow writes" is on; a client
@@ -71,6 +72,75 @@ pub type AiKey<'a> = &'a dyn Fn() -> std::result::Result<Option<String>, String>
 pub struct Session<'a> {
     /// Without it `suggest_metadata` answers "no key", as if none were stored.
     pub ai_key: Option<AiKey<'a>>,
+    /// Delivers a notification to the client while its request is still running. Without it
+    /// long tools run silently, as they do for a client that sent no progress token.
+    pub notify: Option<&'a mut dyn FnMut(Value)>,
+}
+
+/// Whether a message asks for progress: a single `tools/call` carrying
+/// `params._meta.progressToken`. The shell opens a stream for the answer only then.
+pub fn wants_progress(message: &Value) -> bool {
+    message.get("method").and_then(|m| m.as_str()) == Some("tools/call") && progress_token(message.get("params")).is_some()
+}
+
+fn progress_token(params: Option<&Value>) -> Option<Value> {
+    params?
+        .get("_meta")?
+        .get("progressToken")
+        .filter(|t| t.is_string() || t.is_number())
+        .cloned()
+}
+
+/// Sends `notifications/progress` for one request (#102): only when the client sent a token
+/// and the shell can deliver, never backwards, and not more often than a client can use.
+struct Progress<'a, 'b> {
+    token: Option<Value>,
+    notify: Option<&'a mut (dyn FnMut(Value) + 'b)>,
+    sent_at: Option<std::time::Instant>,
+    sent: f64,
+}
+
+const PROGRESS_EVERY: std::time::Duration = std::time::Duration::from_millis(250);
+
+impl<'a, 'b> Progress<'a, 'b> {
+    fn new(token: Option<Value>, notify: Option<&'a mut (dyn FnMut(Value) + 'b)>) -> Progress<'a, 'b> {
+        Progress {
+            token,
+            notify,
+            sent_at: None,
+            sent: f64::NEG_INFINITY,
+        }
+    }
+
+    fn report(&mut self, progress: f64, total: Option<f64>, message: impl FnOnce() -> String) {
+        let (Some(token), Some(notify)) = (&self.token, self.notify.as_mut()) else {
+            return;
+        };
+        // the protocol wants the value to rise with every notification
+        if progress <= self.sent {
+            return;
+        }
+        let finished = total.is_some_and(|t| progress >= t);
+        if !finished && self.sent_at.is_some_and(|t| t.elapsed() < PROGRESS_EVERY) {
+            return;
+        }
+        let mut params = json!({ "progressToken": token, "progress": progress, "message": message() });
+        if let Some(t) = total {
+            params["total"] = json!(t);
+        }
+        notify(json!({ "jsonrpc": "2.0", "method": "notifications/progress", "params": params }));
+        self.sent_at = Some(std::time::Instant::now());
+        self.sent = progress;
+    }
+
+    /// The hashing step of duplicate detection, in files.
+    fn hashing(&mut self, p: crate::engine::HashProgress) {
+        if p.total > 0 {
+            self.report(p.done as f64, Some(p.total as f64), || {
+                format!("Hashing model files: {} of {}", p.done, p.total)
+            });
+        }
+    }
 }
 
 /// The server's self-description for `initialize`.
@@ -177,7 +247,9 @@ fn handle_one(engine: &mut Engine, message: &Value, session: &mut Session) -> Ou
                     Err(e) => Err(e),
                 }
             } else {
-                call_tool(engine, name, &args, &mut changes)
+                let notify = session.notify.as_deref_mut();
+                let mut progress = Progress::new(progress_token(Some(&params)), notify);
+                call_tool(engine, name, &args, &mut changes, &mut progress)
             };
             return Outcome {
                 response: Some(tool_response(id, result)),
@@ -947,7 +1019,7 @@ fn prepare_suggestion(engine: &Engine, args: &Value, session: &Session) -> std::
 
 // ---- tools --------------------------------------------------------------------------------
 
-fn call_tool(engine: &mut Engine, name: &str, args: &Value, changes: &mut Vec<Change>) -> ToolResult {
+fn call_tool(engine: &mut Engine, name: &str, args: &Value, changes: &mut Vec<Change>, progress: &mut Progress) -> ToolResult {
     let settings = engine.mcp_settings();
     let is_delete = matches!(
         name,
@@ -1085,7 +1157,7 @@ fn call_tool(engine: &mut Engine, name: &str, args: &Value, changes: &mut Vec<Ch
             Ok(json!({ "items": engine.analyze_import(&checked) }))
         }
         "find_duplicates" => {
-            let r = engine.find_duplicates(|_| {})?;
+            let r = engine.find_duplicates(|p| progress.hashing(p))?;
             Ok(json!({
                 "candidates": r.candidates, "hashed": r.hashed,
                 "groups": r.groups.iter().map(|g| json!({
@@ -1144,10 +1216,28 @@ fn call_tool(engine: &mut Engine, name: &str, args: &Value, changes: &mut Vec<Ch
                 }
                 return Ok(json!({ "dry_run": true, "projects": rows }));
             }
+            // progress in projects: the files of the one in work are its fraction
+            let total = ids.len() as f64;
+            let mut on_step = |p: crate::engine::PackProgress| {
+                let at = ids.iter().position(|id| *id == p.project_id).unwrap_or(0);
+                let files = if p.total == 0 {
+                    0.0
+                } else {
+                    f64::from(p.index) / f64::from(p.total)
+                };
+                let (share, verb) = match p.phase.as_str() {
+                    "pack" => (files * 0.8, "Packing"),
+                    "verify" => (0.8, "Verifying"),
+                    _ => (files, "Unpacking"),
+                };
+                progress.report(at as f64 + share.min(0.99), Some(total), || {
+                    format!("{verb} project {} of {}: {}", at + 1, ids.len(), p.name)
+                });
+            };
             let r = if packing {
-                engine.pack_projects(&ids, |_| {})
+                engine.pack_projects(&ids, &mut on_step)
             } else {
-                engine.unpack_projects(&ids, arg_bool(args, "keep_archive").unwrap_or(false), |_| {})
+                engine.unpack_projects(&ids, arg_bool(args, "keep_archive").unwrap_or(false), &mut on_step)
             };
             if !r.projects.is_empty() {
                 changes.push(Change::Library {
@@ -1173,7 +1263,11 @@ fn call_tool(engine: &mut Engine, name: &str, args: &Value, changes: &mut Vec<Ch
         }
         "scan_root" => {
             let root = need_str(args, "root_id")?;
-            let r = engine.scan_root_as(&root, "mcp", |_| {})?;
+            let r = engine.scan_root_as(&root, "mcp", |p| {
+                progress.report(f64::from(p.projects_found), None, || {
+                    format!("Scanning: {} projects found", p.projects_found)
+                })
+            })?;
             changes.push(Change::Library {
                 root_id: Some(root),
                 reason: "scan".into(),
@@ -1269,7 +1363,22 @@ fn call_tool(engine: &mut Engine, name: &str, args: &Value, changes: &mut Vec<Ch
                 apply_hints: arg_bool(args, "apply_hints").unwrap_or(true),
                 fetch_pages: arg_bool(args, "fetch_pages").unwrap_or(false),
             };
-            let r = engine.execute_import(&req, |_| {})?;
+            // progress in items: once for copying and, when metadata follows, once more for that
+            let items = req.items.len() as f64;
+            let enrich = req.apply_hints || req.fetch_pages;
+            let total = if enrich { items * 2.0 } else { items };
+            let r = engine.execute_import(&req, |p| {
+                let done = if p.total == 0 {
+                    0.0
+                } else {
+                    f64::from(p.index) / f64::from(p.total)
+                };
+                let (at, verb) = match p.phase.as_str() {
+                    "metadata" => (items + done * items, "Reading metadata for"),
+                    _ => (done * items, "Importing"),
+                };
+                progress.report(at, Some(total), || format!("{verb} {} ({} of {})", p.name, p.index + 1, p.total));
+            })?;
             changes.push(Change::Library {
                 root_id: Some(root_id),
                 reason: "import".into(),
@@ -1428,7 +1537,7 @@ fn call_tool(engine: &mut Engine, name: &str, args: &Value, changes: &mut Vec<Ch
         }
         "resolve_duplicates" => {
             let keep = need_str(args, "keep_project_id")?;
-            let report = engine.find_duplicates(|_| {})?;
+            let report = engine.find_duplicates(|p| progress.hashing(p))?;
             let member = report
                 .groups
                 .iter()
@@ -1463,7 +1572,7 @@ fn call_tool(engine: &mut Engine, name: &str, args: &Value, changes: &mut Vec<Ch
         }
         "remove_shared_files" => {
             let id = need_str(args, "project_id")?;
-            let report = engine.find_duplicates(|_| {})?;
+            let report = engine.find_duplicates(|p| progress.hashing(p))?;
             let member = report
                 .groups
                 .iter()
@@ -1878,7 +1987,7 @@ mod tests {
             let out = handle_with(
                 e,
                 &json!({ "jsonrpc": "2.0", "id": 1, "method": "tools/call", "params": { "name": "suggest_metadata", "arguments": { "project_id": id } } }),
-                &mut Session { ai_key: key },
+                &mut Session { ai_key: key, notify: None },
             );
             assert!(out.changes.is_empty(), "a suggestion changes nothing");
             out
@@ -1941,7 +2050,10 @@ mod tests {
                 { "jsonrpc": "2.0", "id": 1, "method": "tools/call", "params": { "name": "suggest_metadata", "arguments": { "project_id": vase } } },
                 { "jsonrpc": "2.0", "id": 2, "method": "ping" },
             ]),
-            &mut Session { ai_key: Some(&stored) },
+            &mut Session {
+                ai_key: Some(&stored),
+                notify: None,
+            },
         );
         assert!(batch.deferred.is_none());
         let answers = batch.response.unwrap();
@@ -1954,6 +2066,155 @@ mod tests {
         engine.scan_root(&root.id, |_| {}).unwrap();
         assert!(failure(ask(&mut engine, &vase, Some(&stored))).contains("rejected the API key"));
         assert!(failure(ask(&mut engine, "nope", Some(&stored))).contains("project not found"));
+    }
+
+    /// #102: a long tool tells the client how far it is, when the request carries a
+    /// progress token and the shell can deliver.
+    #[test]
+    fn long_tools_report_progress_to_a_request_that_asks_for_it() {
+        let data = tempfile::tempdir().unwrap();
+        let lib = tempfile::tempdir().unwrap();
+        let downloads = tempfile::tempdir().unwrap();
+        std::fs::create_dir_all(lib.path().join("A")).unwrap();
+        std::fs::create_dir_all(lib.path().join("B")).unwrap();
+        std::fs::write(lib.path().join("A/part.stl"), b"solid the same part").unwrap();
+        std::fs::write(lib.path().join("B/part.stl"), b"solid the same part").unwrap();
+        std::fs::write(downloads.path().join("clip.stl"), b"solid clip").unwrap();
+        std::fs::write(downloads.path().join("hook.stl"), b"solid hook").unwrap();
+        let mut engine = Engine::open(data.path()).unwrap();
+        engine.set_deleter(Box::new(|p: &Path| std::fs::remove_file(p)));
+        engine
+            .set_mcp_settings(McpSettings {
+                allow_writes: true,
+                import_dirs: vec![downloads.path().to_path_buf()],
+                ..Default::default()
+            })
+            .unwrap();
+        let root = engine.add_root(lib.path(), SyncMode::Manual).unwrap();
+        engine.scan_root(&root.id, |_| {}).unwrap();
+        let run = |e: &mut Engine, name: &str, args: Value, token: Option<Value>| {
+            let mut notes: Vec<Value> = Vec::new();
+            let mut sink = |v: Value| notes.push(v);
+            let mut params = json!({ "name": name, "arguments": args });
+            if let Some(t) = token {
+                params["_meta"] = json!({ "progressToken": t });
+            }
+            let message = json!({ "jsonrpc": "2.0", "id": 9, "method": "tools/call", "params": params });
+            let out = handle_with(
+                e,
+                &message,
+                &mut Session {
+                    ai_key: None,
+                    notify: Some(&mut sink),
+                },
+            );
+            (structured(&out.response.unwrap()), notes)
+        };
+        let rising = |notes: &[Value]| {
+            notes
+                .windows(2)
+                .all(|w| w[0]["params"]["progress"].as_f64().unwrap() < w[1]["params"]["progress"].as_f64().unwrap())
+        };
+
+        // no token, no notifications: a client that did not ask gets nothing it did not ask for
+        let fresh = tempfile::tempdir().unwrap();
+        let mut quiet = Engine::open(fresh.path()).unwrap();
+        let quiet_root = quiet.add_root(lib.path(), SyncMode::Manual).unwrap();
+        quiet.scan_root(&quiet_root.id, |_| {}).unwrap();
+        let (v, notes) = run(&mut quiet, "find_duplicates", json!({}), None);
+        assert_eq!(v["hashed"], 2);
+        assert!(notes.is_empty());
+
+        // duplicates: the hashing step, in files, from nothing to all of them
+        let (v, notes) = run(&mut engine, "find_duplicates", json!({}), Some(json!("tok-1")));
+        assert_eq!(v["groups"].as_array().unwrap().len(), 1);
+        assert_eq!(notes.len(), 2, "{notes:?}");
+        for n in &notes {
+            assert_eq!(n["jsonrpc"], "2.0");
+            assert_eq!(n["method"], "notifications/progress");
+            assert!(n.get("id").is_none(), "a notification carries no id");
+            assert_eq!(n["params"]["progressToken"], "tok-1");
+            assert_eq!(n["params"]["total"], 2.0);
+        }
+        assert_eq!(notes[0]["params"]["progress"], 0.0);
+        assert_eq!(notes[1]["params"]["progress"], 2.0);
+        assert_eq!(notes[1]["params"]["message"], "Hashing model files: 2 of 2");
+        // nothing left to hash, nothing to report
+        let (_, notes) = run(&mut engine, "find_duplicates", json!({}), Some(json!("tok-2")));
+        assert!(notes.is_empty());
+
+        // an import counts its items, twice when metadata follows; a numeric token comes back as sent
+        let items = json!([
+            { "source": downloads.path().join("clip.stl"), "action": "project", "name": "Clip" },
+            { "source": downloads.path().join("hook.stl"), "action": "project", "name": "Hook" },
+        ]);
+        let (v, notes) = run(
+            &mut engine,
+            "execute_import",
+            json!({ "root_id": root.id, "items": items }),
+            Some(json!(7)),
+        );
+        assert_eq!(v["projects"], json!(["Clip", "Hook"]));
+        assert!(!notes.is_empty());
+        assert_eq!(notes[0]["params"]["progressToken"], 7);
+        assert_eq!(notes[0]["params"]["progress"], 0.0);
+        assert_eq!(notes[0]["params"]["total"], 4.0);
+        assert_eq!(notes[0]["params"]["message"], "Importing Clip (1 of 2)");
+        assert!(rising(&notes));
+
+        // packing counts projects
+        let ids = json!([format!("{}:Clip", root.id), format!("{}:Hook", root.id)]);
+        let (v, notes) = run(&mut engine, "pack_projects", json!({ "project_ids": ids }), Some(json!("p")));
+        assert_eq!(v["projects"].as_array().unwrap().len(), 2, "{v}");
+        assert_eq!(notes[0]["params"]["total"], 2.0);
+        assert!(notes[0]["params"]["message"]
+            .as_str()
+            .unwrap()
+            .starts_with("Packing project 1 of 2"));
+        assert!(rising(&notes));
+        assert!(notes.iter().all(|n| n["params"]["progress"].as_f64().unwrap() < 2.0));
+        let (_, notes) = run(&mut engine, "unpack_projects", json!({ "project_ids": ids }), Some(json!("u")));
+        assert!(notes[0]["params"]["message"]
+            .as_str()
+            .unwrap()
+            .starts_with("Unpacking project 1 of 2"));
+        // a scan has no total to offer
+        let (_, notes) = run(&mut engine, "scan_root", json!({ "root_id": root.id }), Some(json!("s")));
+        assert!(notes.iter().all(|n| n["params"].get("total").is_none()));
+
+        // what the shell asks before it opens a stream
+        let call = |meta: Value| json!({ "jsonrpc": "2.0", "id": 1, "method": "tools/call", "params": { "name": "find_duplicates", "_meta": meta } });
+        assert!(wants_progress(&call(json!({ "progressToken": "t" }))));
+        assert!(wants_progress(&call(json!({ "progressToken": 3 }))));
+        assert!(!wants_progress(&call(json!({}))));
+        assert!(!wants_progress(&call(json!({ "progressToken": null }))));
+        assert!(!wants_progress(
+            &json!({ "jsonrpc": "2.0", "id": 1, "method": "ping", "params": { "_meta": { "progressToken": "t" } } })
+        ));
+        assert!(
+            !wants_progress(&json!([call(json!({ "progressToken": "t" }))])),
+            "batches answer in one piece"
+        );
+    }
+
+    #[test]
+    fn progress_rises_and_is_not_sent_more_often_than_a_client_can_use() {
+        let mut notes: Vec<Value> = Vec::new();
+        let mut sink = |v: Value| notes.push(v);
+        let mut p = Progress::new(Some(json!("t")), Some(&mut sink));
+        p.report(0.0, Some(10.0), || "start".into());
+        p.report(1.0, Some(10.0), || "too soon".into());
+        p.sent_at = Some(std::time::Instant::now() - PROGRESS_EVERY);
+        p.report(2.0, Some(10.0), || "later".into());
+        p.sent_at = Some(std::time::Instant::now() - PROGRESS_EVERY);
+        p.report(2.0, Some(10.0), || "not a step forward".into());
+        p.report(1.5, Some(10.0), || "backwards".into());
+        p.report(10.0, Some(10.0), || "done is always said".into());
+        let said: Vec<&str> = notes.iter().map(|n| n["params"]["message"].as_str().unwrap()).collect();
+        assert_eq!(said, ["start", "later", "done is always said"]);
+        // without a token or without a way to deliver, nothing happens
+        let mut none = Progress::new(None, None);
+        none.report(1.0, None, || unreachable!("the message is not even built"));
     }
 
     #[test]

@@ -89,7 +89,9 @@ behaviour: engine unit test > UI test in browser mode > real-app E2E.
 `meshkeep --mcp [url] [token]` runs no window: it is the stdio MCP bridge that forwards
 each line on stdin to the running app's endpoint (default `http://127.0.0.1:7340/mcp`)
 and prints the answer (ADR-0004). Nothing but protocol lines may go to stdout in that
-mode. In an MSIX install clients start it through the app execution alias `meshkeep.exe`
+mode; a long tool's progress reaches the client as `notifications/progress` lines, which
+the endpoint streams to the bridge as server-sent events (a tool that takes long reports
+through the `Progress` it is handed in `mcp.rs`). In an MSIX install clients start it through the app execution alias `meshkeep.exe`
 (`msix/AppxManifest.xml`), the only path that survives a Store update; Settings picks the
 command with `mcp_bridge::client_command`. The endpoint itself lives in
 `src-tauri/src/mcp_host.rs`; the tools in

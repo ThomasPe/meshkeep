@@ -1,9 +1,11 @@
 //! `meshkeep --mcp [url] [token]`: a stdio MCP server for clients that only launch commands
 //! (Claude Desktop). Each line on stdin is forwarded to the running app's HTTP endpoint and
-//! the answer written back as one line. Nothing else may touch stdout: it is the protocol
-//! channel. The token can also come from `MESHKEEP_MCP_TOKEN`.
+//! the answer written back as one line; when the app answers with an event stream (progress
+//! of a long tool, #102), every message of it becomes a line as it arrives. Nothing else may
+//! touch stdout: it is the protocol channel. The token can also come from
+//! `MESHKEEP_MCP_TOKEN`.
 
-use std::io::{BufRead, Write};
+use std::io::{BufRead, BufReader, Write};
 use std::time::Duration;
 
 pub const DEFAULT_URL: &str = "http://127.0.0.1:7340/mcp";
@@ -49,8 +51,8 @@ pub fn run(url: &str, token: &str) -> i32 {
         if line.trim().is_empty() {
             continue;
         }
-        let reply = forward(&client, url, token, &line);
-        if let Some(text) = reply {
+        let mut closed = false;
+        forward_each(&client, url, token, &line, &mut |text| {
             let mut out = stdout.lock();
             if out
                 .write_all(text.as_bytes())
@@ -58,16 +60,29 @@ pub fn run(url: &str, token: &str) -> i32 {
                 .and_then(|_| out.flush())
                 .is_err()
             {
-                break;
+                closed = true;
             }
+        });
+        if closed {
+            break;
         }
     }
     0
 }
 
-/// One message in, at most one line out. Transport failures become a JSON-RPC error for the
-/// request's id so the client shows the reason instead of hanging.
+/// One message in, its answer out: the last line `forward_each` produces. For a request
+/// that is the response, after any progress notifications.
 pub fn forward(client: &reqwest::blocking::Client, url: &str, token: &str, line: &str) -> Option<String> {
+    let mut last = None;
+    forward_each(client, url, token, line, &mut |text| last = Some(text));
+    last
+}
+
+/// One message in; every message the app sends back for it goes to `emit` as one line, in
+/// order and as it arrives: nothing for a notification, the response for a request, and
+/// before it the progress notifications of a long tool. Transport failures become a
+/// JSON-RPC error for the request's id so the client shows the reason instead of hanging.
+pub fn forward_each(client: &reqwest::blocking::Client, url: &str, token: &str, line: &str, emit: &mut dyn FnMut(String)) {
     let id = serde_json::from_str::<serde_json::Value>(line)
         .ok()
         .and_then(|v| v.get("id").cloned())
@@ -76,7 +91,7 @@ pub fn forward(client: &reqwest::blocking::Client, url: &str, token: &str, line:
         .post(url)
         .header("Authorization", format!("Bearer {token}"))
         .header("Content-Type", "application/json")
-        .header("Accept", "application/json")
+        .header("Accept", "application/json, text/event-stream")
         .header("Connection", "close")
         .body(line.to_string())
         .send();
@@ -84,18 +99,31 @@ pub fn forward(client: &reqwest::blocking::Client, url: &str, token: &str, line:
         id.as_ref()
             .map(|id| serde_json::json!({ "jsonrpc": "2.0", "id": id, "error": { "code": -32000, "message": message } }).to_string())
     };
-    match result {
+    let answer = match result {
         Ok(resp) => {
             let status = resp.status().as_u16();
-            let body = resp.text().unwrap_or_default();
-            match status {
-                200 => serde_json::from_str::<serde_json::Value>(&body)
-                    .ok()
-                    .map(|v| v.to_string())
-                    .or_else(|| fail("Meshkeep returned something that is not JSON".into())),
-                202 => None,
-                401 => fail("Meshkeep rejected the token; copy the current one from Settings → MCP server".into()),
-                _ => fail(format!("Meshkeep answered {status}: {}", body.trim())),
+            let streamed = resp
+                .headers()
+                .get(reqwest::header::CONTENT_TYPE)
+                .and_then(|c| c.to_str().ok())
+                .is_some_and(|c| c.trim_start().to_ascii_lowercase().starts_with("text/event-stream"));
+            if status == 200 && streamed {
+                if relay_events(BufReader::new(resp), id.as_ref(), emit) {
+                    None
+                } else {
+                    fail("the connection to Meshkeep ended before the answer arrived".into())
+                }
+            } else {
+                let body = resp.text().unwrap_or_default();
+                match status {
+                    200 => serde_json::from_str::<serde_json::Value>(&body)
+                        .ok()
+                        .map(|v| v.to_string())
+                        .or_else(|| fail("Meshkeep returned something that is not JSON".into())),
+                    202 => None,
+                    401 => fail("Meshkeep rejected the token; copy the current one from Settings → MCP server".into()),
+                    _ => fail(format!("Meshkeep answered {status}: {}", body.trim())),
+                }
             }
         }
         Err(e) => fail(if e.is_connect() {
@@ -103,12 +131,81 @@ pub fn forward(client: &reqwest::blocking::Client, url: &str, token: &str, line:
         } else {
             format!("cannot reach Meshkeep: {e}")
         }),
+    };
+    if let Some(text) = answer {
+        emit(text);
     }
+}
+
+/// Reads server-sent events and hands the JSON-RPC message of each on as one line. Returns
+/// whether the answer to `id` was among them (a stream that breaks off earlier is a failure
+/// the caller reports). Fields other than `data` and comments are skipped.
+fn relay_events(reader: impl BufRead, id: Option<&serde_json::Value>, emit: &mut dyn FnMut(String)) -> bool {
+    let mut answered = false;
+    let mut data = String::new();
+    let mut dispatch = |data: &mut String| {
+        if let Ok(v) = serde_json::from_str::<serde_json::Value>(data) {
+            if id.is_some() && v.get("id") == id && (v.get("result").is_some() || v.get("error").is_some()) {
+                answered = true;
+            }
+            emit(v.to_string());
+        }
+        data.clear();
+    };
+    for line in reader.lines() {
+        let Ok(line) = line else { break };
+        if line.is_empty() {
+            if !data.is_empty() {
+                dispatch(&mut data);
+            }
+        } else if let Some(value) = line.strip_prefix("data:") {
+            if !data.is_empty() {
+                data.push('\n');
+            }
+            data.push_str(value.strip_prefix(' ').unwrap_or(value));
+        }
+    }
+    if !data.is_empty() {
+        dispatch(&mut data);
+    }
+    answered
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn an_event_stream_becomes_one_line_per_message() {
+        let id = serde_json::json!(5);
+        let stream =
+            "event: message\r\ndata: {\"jsonrpc\":\"2.0\",\"method\":\"notifications/progress\",\"params\":{\"progress\":1}}\r\n\r\n\
+: a comment\n\
+id: 17\n\
+data: {\"jsonrpc\":\"2.0\",\n\
+data:  \"id\":5,\"result\":{\"text\":\"a\\nb\"}}\n\n\
+data: not json\n\n";
+        let mut lines = Vec::new();
+        assert!(relay_events(stream.as_bytes(), Some(&id), &mut |l| lines.push(l)));
+        assert_eq!(lines.len(), 2, "{lines:?}");
+        assert!(lines[0].contains("notifications/progress"));
+        assert!(lines[1].contains("\"id\":5"));
+        assert!(lines.iter().all(|l| !l.contains('\n')), "one line per message");
+
+        // a stream that breaks off before the answer is a failure, not a silent end
+        let cut = "data: {\"jsonrpc\":\"2.0\",\"method\":\"notifications/progress\",\"params\":{\"progress\":1}}\n\ndata: {\"jsonrpc\":\"2.0\",\"id\":6,\"result\":{}}\n\n";
+        let mut lines = Vec::new();
+        assert!(!relay_events(cut.as_bytes(), Some(&id), &mut |l| lines.push(l)));
+        assert_eq!(lines.len(), 2);
+        // the last event counts even without the closing blank line
+        let mut lines = Vec::new();
+        assert!(relay_events(
+            "data: {\"jsonrpc\":\"2.0\",\"id\":5,\"error\":{\"code\":-1,\"message\":\"x\"}}".as_bytes(),
+            Some(&id),
+            &mut |l| lines.push(l)
+        ));
+        assert_eq!(lines.len(), 1);
+    }
 
     #[test]
     fn an_installed_or_dev_exe_is_launched_by_its_own_path() {

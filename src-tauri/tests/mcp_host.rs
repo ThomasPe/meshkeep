@@ -159,6 +159,108 @@ fn serves_mcp_over_http_with_a_token() {
     assert_eq!(*key_reads.lock().unwrap(), 1);
     assert_eq!(*seen.lock().unwrap(), 1, "a suggestion is not a change");
 
+    // progress (#102): a tool call with a progress token, from a client that accepts an event
+    // stream, is answered as one: the notifications first, the result last
+    std::fs::create_dir_all(lib.path().join("Vase copy")).unwrap();
+    std::fs::write(lib.path().join("Vase copy/vase.stl"), b"solid").unwrap();
+    engine.lock().unwrap().scan_root(&root.id, |_| {}).unwrap();
+    let duplicates = r#"{"jsonrpc":"2.0","id":5,"method":"tools/call","params":{"name":"find_duplicates","arguments":{},"_meta":{"progressToken":"dup"}}}"#;
+    let r = client
+        .post(&url)
+        .header("Authorization", "Bearer secret-token")
+        .header("Content-Type", "application/json")
+        .header("Accept", "application/json, text/event-stream")
+        .body(duplicates)
+        .send()
+        .unwrap();
+    assert_eq!(r.status(), 200);
+    assert_eq!(r.headers()["content-type"], "text/event-stream");
+    let events: Vec<serde_json::Value> = r
+        .text()
+        .unwrap()
+        .split("\n\n")
+        .filter(|e| !e.trim().is_empty())
+        .map(|e| {
+            let data = e.lines().find_map(|l| l.strip_prefix("data: ")).expect("every event carries data");
+            assert!(e.starts_with("event: message\n"), "{e}");
+            serde_json::from_str(data).unwrap()
+        })
+        .collect();
+    assert_eq!(events.len(), 3, "{events:?}");
+    assert_eq!(events[0]["method"], "notifications/progress");
+    assert_eq!(events[0]["params"]["progressToken"], "dup");
+    assert_eq!(events[0]["params"]["progress"], 0.0);
+    assert_eq!(events[1]["params"]["progress"], 2.0);
+    assert_eq!(events[2]["id"], 5);
+    assert_eq!(events[2]["result"]["structuredContent"]["hashed"], 2, "{}", events[2]);
+    // the connection stays usable after a stream (the chunked body ended properly)
+    assert_eq!(
+        client
+            .post(&url)
+            .header("Authorization", "Bearer secret-token")
+            .body(r#"{"jsonrpc":"2.0","id":6,"method":"ping"}"#)
+            .send()
+            .unwrap()
+            .json::<serde_json::Value>()
+            .unwrap()["id"],
+        6
+    );
+    // a client that does not accept a stream, or sent no token, gets plain JSON as before
+    let v: serde_json::Value = post(duplicates, Some("secret-token"), None).json().unwrap();
+    assert_eq!(v["result"]["structuredContent"]["groups"].as_array().unwrap().len(), 1, "{v}");
+    let r = client
+        .post(&url)
+        .header("Authorization", "Bearer secret-token")
+        .header("Accept", "application/json, text/event-stream")
+        .body(r#"{"jsonrpc":"2.0","id":7,"method":"tools/call","params":{"name":"find_duplicates","arguments":{}}}"#)
+        .send()
+        .unwrap();
+    assert_eq!(r.headers()["content-type"], "application/json");
+    // and it is a stream on the wire, not a body sent at the end: the head arrives while the
+    // tool has not even started (the test holds the engine), the result once it could run
+    {
+        use std::io::{Read, Write};
+        let body = r#"{"jsonrpc":"2.0","id":8,"method":"tools/call","params":{"name":"find_duplicates","arguments":{},"_meta":{"progressToken":1}}}"#;
+        let busy = engine.lock().unwrap();
+        let mut socket = std::net::TcpStream::connect(("127.0.0.1", port)).unwrap();
+        socket.set_read_timeout(Some(std::time::Duration::from_secs(10))).unwrap();
+        write!(
+            socket,
+            "POST /mcp HTTP/1.1\r\nHost: 127.0.0.1\r\nAuthorization: Bearer secret-token\r\nAccept: text/event-stream\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
+            body.len()
+        )
+        .unwrap();
+        let mut head = Vec::new();
+        let mut byte = [0u8; 1];
+        while !head.ends_with(b"\r\n\r\n") {
+            socket.read_exact(&mut byte).expect("the response head arrives before the tool ran");
+            head.push(byte[0]);
+        }
+        let head = String::from_utf8(head).unwrap();
+        assert!(head.starts_with("HTTP/1.1 200 OK"), "{head}");
+        assert!(head.contains("text/event-stream"), "{head}");
+        drop(busy);
+        let mut rest = String::new();
+        socket.read_to_string(&mut rest).unwrap();
+        assert!(rest.contains(r#""id":8"#), "{rest}");
+        assert!(rest.ends_with("0\r\n\r\n"), "the chunked body is closed: {rest:?}");
+    }
+    // through the stdio bridge every message of the stream is a line of its own, in order
+    engine.lock().unwrap().scan_root(&root.id, |_| {}).unwrap();
+    std::fs::write(lib.path().join("Vase/vase.stl"), b"SOLID").unwrap();
+    std::fs::write(lib.path().join("Vase copy/vase.stl"), b"SOLID").unwrap();
+    engine.lock().unwrap().scan_root(&root.id, |_| {}).unwrap();
+    let mut lines = Vec::new();
+    meshkeep_lib::mcp_bridge::forward_each(&reqwest::blocking::Client::new(), &url, "secret-token", duplicates, &mut |l| {
+        lines.push(l)
+    });
+    assert!(lines.len() >= 2, "{lines:?}");
+    assert!(lines.iter().all(|l| !l.contains('\n')));
+    assert!(lines[0].contains("notifications/progress"), "{lines:?}");
+    let last: serde_json::Value = serde_json::from_str(lines.last().unwrap()).unwrap();
+    assert_eq!(last["id"], 5);
+    assert!(last["result"]["structuredContent"]["groups"].is_array());
+
     // the stdio bridge forwards one line and turns transport trouble into JSON-RPC errors
     let bridge = reqwest::blocking::Client::new();
     let line = meshkeep_lib::mcp_bridge::forward(&bridge, &url, "secret-token", r#"{"jsonrpc":"2.0","id":"a","method":"ping"}"#).unwrap();

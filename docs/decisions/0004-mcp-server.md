@@ -170,3 +170,36 @@ sent for it.
 
 Point 6 of the decision ("Meshkeep still makes no network request of its own for this")
 now has this one exception, and the Settings card and the privacy policy state it.
+
+## Amendment 2026-11-20: progress for long tools (#102)
+
+Hashing a large library, an import that reads model pages at one request per second and
+packing many projects take minutes, and a client saw nothing until the answer. The
+protocol has a way to say how far a request is: the client puts a `progressToken` into
+`params._meta`, the server sends `notifications/progress` with that token while it works.
+
+- **What reports.** `find_duplicates` (and the hashing inside `resolve_duplicates` and
+  `remove_shared_files`) in files; `execute_import` in items, counted a second time when
+  the metadata step follows; `pack_projects` and `unpack_projects` in projects, the files
+  of the one in work as its fraction; `scan_root` in projects found, without a total. Each
+  notification carries a one-line message. Values only rise, and at most four are sent
+  per second, the last step always.
+- **Transport.** The decision above said "POST only, JSON responses, no SSE". That holds
+  for every request except this one case: a single `tools/call` with a progress token, from
+  a client whose `Accept` lists `text/event-stream`, is answered on the same POST as a
+  stream of server-sent events, the notifications as they happen and the response as the
+  last event; then the stream ends. This is the Streamable HTTP transport as specified,
+  and still stateless: no session, no `GET` stream, nothing sent outside a running
+  request. A client that sends no token or does not accept a stream gets JSON as before.
+- **The host writes that response by hand** (chunked, one flushed chunk per event),
+  because the HTTP library sends a body only when it is complete.
+- **The stdio bridge** accepts a stream and writes each message of it as its own line as
+  it arrives, so in `--mcp` mode progress reaches the client as protocol notifications
+  and nothing else touches stdout. A stream that ends before the answer becomes a JSON-RPC
+  error for that request.
+- **Who decides.** `mcp::wants_progress` tells the host whether to open a stream; the
+  engine builds the notifications and the host only delivers them (`Session::notify`).
+  Inside a batch no progress is sent.
+
+Not part of this: cancelling a running tool (`notifications/cancelled` is ignored; the
+tool finishes and its answer is dropped by the client).
