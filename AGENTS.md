@@ -68,6 +68,8 @@ merged. `docs/store/README.md` has the whole pipeline.
    README/license text and the current sidecar are sent, never model geometry. The engine
    validates the JSON answer; the user ticks fields in a dialog and the result goes through
    the normal sidecar save with its stamp. Answers are a cache (`<data dir>/ai-cache/`).
+   The MCP tool `suggest_metadata` is the same call for an agent, behind its own switch
+   (`allow_ai`); it returns the proposal and writes nothing.
 
 ## Definition of done for a backlog item
 

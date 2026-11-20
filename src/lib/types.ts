@@ -339,7 +339,7 @@ export type AiProviderKind = 'anthropic';
 export interface NetworkSettings { fetch_model_pages: boolean }
 
 /** The local MCP server for AI agents (ADR-0004). */
-export interface McpSettings { enabled: boolean; port: number; token: string; allow_writes: boolean; allow_deletes: boolean; import_dirs: string[] }
+export interface McpSettings { enabled: boolean; port: number; token: string; allow_writes: boolean; allow_deletes: boolean; import_dirs: string[]; allow_ai: boolean }
 /** Library conventions per root (#58): the file as text plus what it parses to. */
 export interface ConventionsView { root_id: string; path: string; text: string | null; parsed: Record<string, unknown> | null; error: string | null }
 export interface ConventionDeviation { project_id: string; rel_path: string; kind: 'folder' | 'title' | 'license' | 'tags'; current: string; expected: string; fixable: boolean }

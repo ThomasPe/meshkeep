@@ -150,8 +150,9 @@ Status: account created and the name **Meshkeep** reserved (2026-10-19); the dom
   the publisher: none. Two optional features talk to third parties only on the user's
   action (AI assistance with the user's own API key; "Load model pages", off by default);
   a third, the local MCP server, accepts connections from programs on the same computer
-  only, off by default; all three are described on the privacy page, which is the answer
-  to the privacy questions.
+  only, off by default (a connected program can trigger the AI assistance only behind a
+  further switch, also off by default); all three are described on the privacy page,
+  which is the answer to the privacy questions.
 - Privacy policy URL: `https://meshkeep.app/privacy/` (EN) and
   `https://meshkeep.app/de/datenschutz/` (DE), served from `site/` by `pages.yml`.
   Website `https://meshkeep.app`, support `https://meshkeep.app/support/`.

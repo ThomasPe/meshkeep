@@ -709,6 +709,16 @@ test('MCP server: off by default, enabling mints a token, snippets and import fo
   await expect(page.getByTestId('mcp-deletes')).toHaveAttribute('data-state', 'unchecked');
   await page.getByTestId('mcp-writes').click();
   await expect(page.getByTestId('mcp-deletes')).toHaveAttribute('data-state', 'unchecked');
+  // the app's own AI suggestion has a switch of its own, and says so when no key is stored (#101)
+  await expect(page.getByTestId('mcp-ai-hint')).toContainText('cannot use your AI key');
+  await page.getByTestId('mcp-ai').click();
+  await expect(page.getByText('Agents may now ask for AI suggestions')).toBeVisible();
+  await expect(page.getByTestId('mcp-ai-hint')).toContainText('no API key is stored');
+  expect(await page.evaluate(() => (window as unknown as { __mockMcp?: Array<{ allow_ai: boolean }> }).__mockMcp!.at(-1))).toMatchObject({ allow_ai: true });
+  await page.getByTestId('ai-key').fill('sk-ant-mock-key');
+  await page.getByTestId('ai-key-save').click();
+  await expect(page.getByTestId('mcp-ai-hint')).toContainText('with your key');
+  await expect(page.getByTestId('mcp-sent')).toContainText('every suggestion an agent asks for goes to your AI provider');
   // a port below 1024 is refused, a taken port shows up in the status line
   await page.getByTestId('mcp-port').fill('80');
   await page.getByTestId('mcp-port-save').click();

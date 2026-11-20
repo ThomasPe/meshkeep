@@ -279,10 +279,15 @@ cost estimate, import proposals in the staging dialog (see ADR-0003, features 4,
       (`…/file/{+path}`) and its preview (`…/thumbnail`, PNG) below it; `resources/list`
       pages by title, `resources/templates/list`, `resources/read`. Read-only, no
       subscriptions.
-- [ ] **Follow-ups.** A tool for the in-app AI suggestion so an agent without its own
-      eyes can use the thumbnail; progress notifications for long tools (duplicates,
-      imports with pages); an audit view of what agents changed (reuse the undo log once
-      APP-6 exists).
+- [x] **The in-app AI suggestion as a tool** (#101, ADR-0004 amendment). `suggest_metadata`
+      behind a switch of its own ("Allow AI suggestions", off by default): the assistant
+      of ADR-0003 looks at the preview, file names and readme for an agent that cannot,
+      with the user's key, under the same rules (no key no request, documented inputs
+      only, validated, cached, never written). The provider call runs outside the engine
+      lock.
+- [ ] **Follow-ups.** Progress notifications for long tools (duplicates, imports with
+      pages); an audit view of what agents changed (reuse the undo log once APP-6
+      exists).
 
 ## Phase 3: Model tools
 - [ ] **Transforms & mesh analysis** (VIEW-7).

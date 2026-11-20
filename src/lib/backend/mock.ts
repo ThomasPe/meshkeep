@@ -116,7 +116,7 @@ export function createMockBackend(): Backend {
   // AI assistance: endpoint and model in "settings", the key only as a flag (never readable back).
   // `?ai=unauthorized|rate_limited|invalid|unavailable` makes every call fail that way, like MESHKEEP_AI_MOCK.
   const network = { fetch_model_pages: false };
-  const mcp: McpSettings = { enabled: false, port: 7340, token: '', allow_writes: false, allow_deletes: false, import_dirs: [] };
+  const mcp: McpSettings = { enabled: false, port: 7340, token: '', allow_writes: false, allow_deletes: false, import_dirs: [], allow_ai: false };
   const conventions = new Map<string, string>();
   const ownPacks = new Set<string>(); // projects packed here (their archives keep the project's layout)
   const STARTER_CONVENTIONS = `# Library conventions for this folder (Meshkeep reads this file, agents receive it).\nversion: 1\nlayout:\n  pattern: "{creator}/{title}"\n  shared_folder: Misc\n  shared_threshold: 2\n  unknown_creator: Misc\ntitles:\n  strip: [thingiverse_id, date_suffix]\nmetadata:\n  tags: { language: en, case: lower, separator: "-" }\n  license_default: Personal use\n  licenses: [CC0-1.0, CC-BY-4.0, CC-BY-NC-SA-4.0, Personal use]\nnotes: |\n  Link the original model as the source, not a later remake.\n`;

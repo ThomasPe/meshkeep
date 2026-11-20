@@ -285,6 +285,7 @@ function McpCard() {
   const status = useMcpStatus(!!mcp.data?.enabled);
   const set = useSetMcpSettings();
   const regen = useRegenerateMcpToken();
+  const ai = useAiSettings();
   const [showToken, setShowToken] = useState(false);
   const [port, setPort] = useState<string | null>(null);
   const s = mcp.data;
@@ -326,6 +327,12 @@ function McpCard() {
         <div className="grid max-w-md justify-items-end gap-1">
           <label className={cn('flex items-center gap-2 text-sm text-muted-foreground', !s?.allow_writes && 'opacity-60')}><Trash2 className="size-4" /><Switch checked={!!s?.allow_writes && !!s?.allow_deletes} disabled={!s || !s.allow_writes || set.isPending} onCheckedChange={(v) => save({ allow_deletes: v }, v ? t('settings.mcpDeletesOn') : t('settings.mcpDeletesOff'))} data-testid="mcp-deletes" aria-label={t('settings.mcpDeletes')} /></label>
           <span className="text-right text-xs text-muted-foreground">{!s?.allow_writes ? t('settings.mcpDeletesNeedsWrites') : s.allow_deletes ? t('settings.mcpDeletesHintOn') : t('settings.mcpDeletesHintOff')}</span>
+        </div>
+      </Row>
+      <Row label={t('settings.mcpAi')}>
+        <div className="grid justify-items-end gap-1">
+          <label className="flex items-center gap-2 text-sm text-muted-foreground"><Sparkles className="size-4" /><Switch checked={!!s?.allow_ai} disabled={!s || set.isPending} onCheckedChange={(v) => save({ allow_ai: v }, v ? t('settings.mcpAiOn') : t('settings.mcpAiOff'))} data-testid="mcp-ai" aria-label={t('settings.mcpAi')} /></label>
+          <span className="text-right text-xs text-muted-foreground" data-testid="mcp-ai-hint">{!s?.allow_ai ? t('settings.mcpAiHintOff') : ai.data?.hasKey ? t('settings.mcpAiHintOn') : t('settings.mcpAiHintNoKey')}</span>
         </div>
       </Row>
       <Row label={t('settings.mcpPort')}>

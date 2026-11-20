@@ -21,6 +21,27 @@ use tiny_http::{Header, Method, Request, Response, Server};
 /// Called with the changes a message made, after the engine lock is released.
 pub type OnChange = Arc<dyn Fn(&[Change]) + Send + Sync>;
 
+/// Reads the AI key from wherever the shell keeps it (the OS credential store), each time
+/// an agent asks for a suggestion; the key is never held here.
+pub type ReadAiKey = Arc<dyn Fn() -> Result<Option<String>, String> + Send + Sync>;
+
+/// What the app lends the server.
+#[derive(Clone)]
+pub struct Hooks {
+    pub on_change: OnChange,
+    pub ai_key: ReadAiKey,
+}
+
+impl Hooks {
+    /// Hooks for a server that only reports changes: no AI key, so no AI request.
+    pub fn changes_only(on_change: OnChange) -> Hooks {
+        Hooks {
+            on_change,
+            ai_key: Arc::new(|| Ok(None)),
+        }
+    }
+}
+
 #[derive(Default)]
 struct Stats {
     requests: AtomicU64,
@@ -69,7 +90,7 @@ impl Host {
     }
 
     /// Starts on `addr` ("127.0.0.1:0" picks a free port) and returns the port in use.
-    pub fn start(&self, addr: &str, token: String, engine: Arc<Mutex<Engine>>, on_change: OnChange) -> Result<u16, String> {
+    pub fn start(&self, addr: &str, token: String, engine: Arc<Mutex<Engine>>, hooks: Hooks) -> Result<u16, String> {
         self.stop();
         let server = Server::http(addr).map_err(|e| format!("cannot listen on {addr}: {e}"))?;
         let port = server.server_addr().to_ip().map(|a| a.port()).unwrap_or(0);
@@ -80,7 +101,7 @@ impl Host {
             .name("meshkeep-mcp".into())
             .spawn(move || {
                 while let Ok(mut req) = srv.recv() {
-                    let response = handle(&mut req, &token, &engine, &on_change, &stats);
+                    let response = handle(&mut req, &token, &engine, &hooks, &stats);
                     let _ = req.respond(response);
                 }
             })
@@ -104,13 +125,13 @@ impl Host {
 
     /// Starts, stops or restarts so the server matches the settings; a failure to bind is
     /// kept for the status line instead of failing the settings change.
-    pub fn apply(&self, settings: &meshkeep_engine::settings::McpSettings, engine: Arc<Mutex<Engine>>, on_change: OnChange) {
+    pub fn apply(&self, settings: &meshkeep_engine::settings::McpSettings, engine: Arc<Mutex<Engine>>, hooks: Hooks) {
         if !settings.enabled || settings.token.is_empty() {
             self.stop();
             *self.error.lock().unwrap() = None;
             return;
         }
-        if let Err(e) = self.start(&format!("127.0.0.1:{}", settings.port), settings.token.clone(), engine, on_change) {
+        if let Err(e) = self.start(&format!("127.0.0.1:{}", settings.port), settings.token.clone(), engine, hooks) {
             log::warn!("{e}");
             *self.error.lock().unwrap() = Some(e);
         }
@@ -161,7 +182,7 @@ fn origin_ok(origin: Option<&str>) -> bool {
     }
 }
 
-fn handle(req: &mut Request, token: &str, engine: &Arc<Mutex<Engine>>, on_change: &OnChange, stats: &Stats) -> Reply {
+fn handle(req: &mut Request, token: &str, engine: &Arc<Mutex<Engine>>, hooks: &Hooks, stats: &Stats) -> Reply {
     let path = req.url().split('?').next().unwrap_or("/");
     if path != "/mcp" && path != "/" {
         return json_reply(404, r#"{"error":"not found"}"#.into());
@@ -203,10 +224,13 @@ fn handle(req: &mut Request, token: &str, engine: &Arc<Mutex<Engine>>, on_change
         };
     let outcome = {
         let mut engine = engine.lock().unwrap();
-        mcp::handle(&mut engine, &message)
+        let ai_key = || (hooks.ai_key)();
+        mcp::handle_with(&mut engine, &message, &mut mcp::Session { ai_key: Some(&ai_key) })
     };
+    // the AI provider is called without the engine lock, so the window keeps working meanwhile
+    let outcome = outcome.finish();
     if !outcome.changes.is_empty() {
-        on_change(&outcome.changes);
+        (hooks.on_change)(&outcome.changes);
     }
     match outcome.response {
         Some(r) => json_reply(200, r.to_string()),

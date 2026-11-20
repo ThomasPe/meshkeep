@@ -7,12 +7,15 @@
 //! renames, moves, favorites, collections) only exist while "allow writes" is on; a client
 //! that listed tools before the switch flipped gets a clear error, not a silent no-op.
 //! Deleting ones (files, projects, duplicates, always to the trash) need the third switch on
-//! top; every deleting or moving tool takes `dry_run`.
+//! top; every deleting or moving tool takes `dry_run`. `suggest_metadata` has a switch of
+//! its own: it is the one tool that makes the app itself call out (ADR-0003), with the
+//! user's key, and it never writes.
 
 use crate::engine::{BatchUpdate, MoveFilesDest, PromoteItem, UpdateMetadata};
 use crate::error::EngineError;
 use crate::import::{ArchivePolicy, ImportAction, ImportRequest, ImportRequestItem};
 use crate::model::{FileKind, ListQuery, MissingField, Project, SortKey};
+use crate::settings::McpSettings;
 use crate::Engine;
 use serde_json::{json, Map, Value};
 use std::path::{Path, PathBuf};
@@ -30,11 +33,44 @@ pub enum Change {
 }
 
 /// What one JSON-RPC message produced: a response (none for notifications) and the changes
-/// made on the way.
+/// made on the way. A message whose answer needs a slow call that does not touch the engine
+/// (the AI provider) comes back with `deferred` instead of a response: the shell releases
+/// the engine lock first and then calls `finish`.
 #[derive(Debug, Default)]
 pub struct Outcome {
     pub response: Option<Value>,
     pub changes: Vec<Change>,
+    pub deferred: Option<Deferred>,
+}
+
+impl Outcome {
+    /// Runs the deferred part, if any, and returns the complete outcome.
+    pub fn finish(mut self) -> Outcome {
+        if let Some(d) = self.deferred.take() {
+            self.response = Some((d.0)());
+        }
+        self
+    }
+}
+
+/// The rest of a request, to run without the engine: returns the JSON-RPC response.
+pub struct Deferred(Box<dyn FnOnce() -> Value + Send>);
+
+impl std::fmt::Debug for Deferred {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("Deferred")
+    }
+}
+
+/// Reads the user's AI key; the engine never stores it (ADR-0003), the shell keeps it in
+/// the OS credential store.
+pub type AiKey<'a> = &'a dyn Fn() -> std::result::Result<Option<String>, String>;
+
+/// What the shell lends the protocol while one message runs.
+#[derive(Default)]
+pub struct Session<'a> {
+    /// Without it `suggest_metadata` answers "no key", as if none were stored.
+    pub ai_key: Option<AiKey<'a>>,
 }
 
 /// The server's self-description for `initialize`.
@@ -54,9 +90,15 @@ models, and execute_import with action `packed` adds a zip download without extr
 Every project is also a resource (meshkeep://project/{id}, listed by resources/list): the same JSON as get_project, with its text files and its \
 preview picture below it.";
 
+/// Handles one message or a batch with nothing lent by a shell: what tests and simple hosts
+/// use. See `handle_with`.
+pub fn handle(engine: &mut Engine, message: &Value) -> Outcome {
+    handle_with(engine, message, &mut Session::default())
+}
+
 /// Handles one message or a batch. Batches get a batch back; a batch of notifications gets
 /// no response at all.
-pub fn handle(engine: &mut Engine, message: &Value) -> Outcome {
+pub fn handle_with(engine: &mut Engine, message: &Value, session: &mut Session) -> Outcome {
     match message {
         Value::Array(items) => {
             let mut out = Outcome::default();
@@ -66,7 +108,8 @@ pub fn handle(engine: &mut Engine, message: &Value) -> Outcome {
                 return out;
             }
             for item in items {
-                let one = handle_one(engine, item);
+                // inside a batch the slow part runs in place: the answers have to stay in order
+                let one = handle_one(engine, item, session).finish();
                 if let Some(r) = one.response {
                     responses.push(r);
                 }
@@ -77,16 +120,16 @@ pub fn handle(engine: &mut Engine, message: &Value) -> Outcome {
             }
             out
         }
-        other => handle_one(engine, other),
+        other => handle_one(engine, other, session),
     }
 }
 
-fn handle_one(engine: &mut Engine, message: &Value) -> Outcome {
+fn handle_one(engine: &mut Engine, message: &Value, session: &mut Session) -> Outcome {
     let id = message.get("id").cloned().filter(|v| !v.is_null());
     let Some(method) = message.get("method").and_then(|m| m.as_str()) else {
         return Outcome {
             response: Some(error_response(id.unwrap_or(Value::Null), -32600, "not a request: no method")),
-            changes: Vec::new(),
+            ..Default::default()
         };
     };
     let params = message.get("params").cloned().unwrap_or(Value::Null);
@@ -119,31 +162,28 @@ fn handle_one(engine: &mut Engine, message: &Value) -> Outcome {
             }))
         }
         "ping" => Ok(json!({})),
-        "tools/list" => {
-            let s = engine.mcp_settings();
-            Ok(json!({ "tools": tools(s.allow_writes, s.allow_writes && s.allow_deletes) }))
-        }
+        "tools/list" => Ok(json!({ "tools": tools(&engine.mcp_settings()) })),
         "tools/call" => {
             let name = params.get("name").and_then(|n| n.as_str()).unwrap_or("");
             let args = params.get("arguments").cloned().unwrap_or_else(|| json!({}));
-            Ok(match call_tool(engine, name, &args, &mut changes) {
-                Ok(v) => {
-                    // the spec wants an object here; clients reject a bare array
-                    let v = if v.is_object() { v } else { json!({ "result": v }) };
-                    json!({
-                        "content": [{ "type": "text", "text": serde_json::to_string_pretty(&v).unwrap_or_default() }],
-                        "structuredContent": v,
-                        "isError": false,
-                    })
-                }
-                Err(ToolError::Unknown(n)) => {
-                    return Outcome {
-                        response: Some(error_response(id, -32602, &format!("unknown tool: {n}"))),
-                        changes,
+            let result = if name == "suggest_metadata" {
+                match prepare_suggestion(engine, &args, session) {
+                    Ok(job) => {
+                        return Outcome {
+                            deferred: Some(Deferred(Box::new(move || tool_response(id, job())))),
+                            ..Default::default()
+                        }
                     }
+                    Err(e) => Err(e),
                 }
-                Err(ToolError::Failed(msg)) => json!({ "content": [{ "type": "text", "text": msg }], "isError": true }),
-            })
+            } else {
+                call_tool(engine, name, &args, &mut changes)
+            };
+            return Outcome {
+                response: Some(tool_response(id, result)),
+                changes,
+                deferred: None,
+            };
         }
         "prompts/list" => Ok(json!({ "prompts": prompts() })),
         "prompts/get" => prompt(params.get("name").and_then(|n| n.as_str()).unwrap_or(""), params.get("arguments")).map_err(RpcError::from),
@@ -165,7 +205,27 @@ fn handle_one(engine: &mut Engine, message: &Value) -> Outcome {
     Outcome {
         response: Some(response),
         changes,
+        deferred: None,
     }
+}
+
+/// The JSON-RPC answer to `tools/call`: a failed tool is a result with `isError`, an
+/// unknown tool a protocol error.
+fn tool_response(id: Value, result: ToolResult) -> Value {
+    let result = match result {
+        Ok(v) => {
+            // the spec wants an object here; clients reject a bare array
+            let v = if v.is_object() { v } else { json!({ "result": v }) };
+            json!({
+                "content": [{ "type": "text", "text": serde_json::to_string_pretty(&v).unwrap_or_default() }],
+                "structuredContent": v,
+                "isError": false,
+            })
+        }
+        Err(ToolError::Unknown(n)) => return error_response(id, -32602, &format!("unknown tool: {n}")),
+        Err(ToolError::Failed(msg)) => json!({ "content": [{ "type": "text", "text": msg }], "isError": true }),
+    };
+    json!({ "jsonrpc": "2.0", "id": id, "result": result })
 }
 
 fn error_response(id: Value, code: i64, message: &str) -> Value {
@@ -261,7 +321,9 @@ fn tool(name: &str, desc: &str, input: Value, read_only: bool, destructive: bool
 }
 
 /// The tools a client may call right now.
-pub fn tools(allow_writes: bool, allow_deletes: bool) -> Vec<Value> {
+pub fn tools(settings: &McpSettings) -> Vec<Value> {
+    let allow_writes = settings.allow_writes;
+    let allow_deletes = allow_writes && settings.allow_deletes;
     let mut t = vec![
         tool("list_roots", "The library folders Meshkeep manages, with their ids and last scan.", schema(&[], &[]), true, false),
         tool("library_stats", "Project count, total size and favorites.", schema(&[], &[]), true, false),
@@ -360,6 +422,17 @@ pub fn tools(allow_writes: bool, allow_deletes: bool) -> Vec<Value> {
             false,
         ),
     ];
+    if settings.allow_ai {
+        let mut ai = tool(
+            "suggest_metadata",
+            "Ask Meshkeep's own AI assistant what a project is: it looks at the project's preview picture, its file names, readme and license text and the metadata already there, and proposes title, creator, license, description and tags. For an agent that cannot see the preview itself. Uses the AI provider and key the user set up in Settings (one request per project; an answer is cached until the project changes) and sends those inputs there, never model geometry. Nothing is written: check the proposal and write what holds with update_metadata.",
+            schema(&[("project_id", s("Project id"))], &["project_id"]),
+            true,
+            false,
+        );
+        ai["annotations"]["openWorldHint"] = json!(true);
+        t.push(ai);
+    }
     if allow_writes {
         t.extend([
             tool(
@@ -833,6 +906,43 @@ fn arg_strings(args: &Value, key: &str) -> Option<Vec<String>> {
 }
 fn arg_bool(args: &Value, key: &str) -> Option<bool> {
     args.get(key).and_then(|v| v.as_bool())
+}
+
+// ---- the in-app AI suggestion (#101) --------------------------------------------------------
+
+type SuggestionJob = Box<dyn FnOnce() -> ToolResult + Send>;
+
+/// Everything `suggest_metadata` needs from the engine, gathered under its lock; the
+/// returned job makes the provider call and needs the engine no more. The rules of ADR-0003
+/// hold on this path as in the window: no key, no request; only the documented inputs
+/// leave; the answer is validated and never written.
+fn prepare_suggestion(engine: &Engine, args: &Value, session: &Session) -> std::result::Result<SuggestionJob, ToolError> {
+    if !engine.mcp_settings().allow_ai {
+        return Err(ToolError::Failed(
+            "suggest_metadata is not available: AI suggestions for agents are off. The user can allow them in Settings → MCP server."
+                .into(),
+        ));
+    }
+    let id = need_str(args, "project_id")?;
+    let key = match session.ai_key {
+        Some(read) => read().map_err(|e| ToolError::Failed(format!("the AI key could not be read: {e}")))?,
+        None => None,
+    };
+    let provider = engine.ai_provider(key.as_deref()).map_err(|e| match e {
+        EngineError::AiDisabled => {
+            ToolError::Failed("AI assistance is not set up: the user can store an API key in Settings → AI assistance.".into())
+        }
+        other => other.into(),
+    })?;
+    let prepared = engine.ai_prepare_suggestion(&id)?;
+    Ok(Box::new(move || {
+        let suggestion = crate::ai::run_suggestion(prepared, provider.as_ref())?;
+        let mut v = serde_json::to_value(&suggestion).map_err(|e| e.to_string())?;
+        v["project_id"] = json!(id);
+        v["note"] =
+            json!("A proposal, nothing was written. Keep what the files or a model page back up and write it with update_metadata.");
+        Ok(v)
+    }))
 }
 
 // ---- tools --------------------------------------------------------------------------------
@@ -1551,7 +1661,6 @@ fn list_folder(dir: &Path) -> std::result::Result<Vec<Value>, ToolError> {
 mod tests {
     use super::*;
     use crate::model::SyncMode;
-    use crate::settings::McpSettings;
 
     fn touch(p: &Path, bytes: usize) {
         std::fs::create_dir_all(p.parent().unwrap()).unwrap();
@@ -1738,6 +1847,113 @@ mod tests {
             assert_eq!(r["error"]["code"], -32002, "{missing}: {r}");
             assert_eq!(r["error"]["data"]["uri"], missing);
         }
+    }
+
+    /// #101: the app's own AI suggestion as a tool, under the rules of ADR-0003: its own
+    /// switch, no request without a key, nothing written.
+    #[test]
+    fn the_ai_suggestion_is_a_tool_behind_its_own_switch_and_the_key() {
+        use crate::ai::{MockMode, MockProvider};
+        use std::sync::Arc;
+        let data = tempfile::tempdir().unwrap();
+        let lib = tempfile::tempdir().unwrap();
+        touch(&lib.path().join("benchy boat/benchy.stl"), 10);
+        std::fs::write(lib.path().join("benchy boat/README.md"), "The jolly 3D printing torture-test").unwrap();
+        touch(&lib.path().join("Vase/vase.stl"), 20);
+        let mut engine = Engine::open(data.path()).unwrap();
+        let root = engine.add_root(lib.path(), SyncMode::Manual).unwrap();
+        engine.scan_root(&root.id, |_| {}).unwrap();
+        let mock = Arc::new(MockProvider::new(MockMode::Ok));
+        engine.set_ai_provider(Some(mock.clone()));
+        let id = format!("{}:benchy boat", root.id);
+        let listed = |e: &mut Engine| {
+            rpc(e, "tools/list", json!({}))["result"]["tools"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .find(|t| t["name"] == "suggest_metadata")
+                .cloned()
+        };
+        let ask = |e: &mut Engine, id: &str, key: Option<AiKey>| {
+            let out = handle_with(
+                e,
+                &json!({ "jsonrpc": "2.0", "id": 1, "method": "tools/call", "params": { "name": "suggest_metadata", "arguments": { "project_id": id } } }),
+                &mut Session { ai_key: key },
+            );
+            assert!(out.changes.is_empty(), "a suggestion changes nothing");
+            out
+        };
+        let failure = |out: Outcome| {
+            let r = out.finish().response.unwrap();
+            assert_eq!(r["result"]["isError"], true, "{r}");
+            r["result"]["content"][0]["text"].as_str().unwrap().to_string()
+        };
+        let stored = || Ok(Some("sk-test".to_string()));
+
+        // off by default: not listed, refused even with a key
+        assert!(listed(&mut engine).is_none());
+        assert!(failure(ask(&mut engine, &id, Some(&stored))).contains("AI suggestions for agents are off"));
+        engine
+            .set_mcp_settings(McpSettings {
+                allow_ai: true,
+                ..Default::default()
+            })
+            .unwrap();
+        let tool = listed(&mut engine).unwrap();
+        assert_eq!(tool["annotations"]["readOnlyHint"], true);
+        assert_eq!(tool["annotations"]["openWorldHint"], true, "it calls a service outside the machine");
+
+        // no key, no request: whether the shell lends no reader, finds no key or cannot read it
+        assert!(failure(ask(&mut engine, &id, None)).contains("API key"));
+        assert!(failure(ask(&mut engine, &id, Some(&|| Ok(None)))).contains("API key"));
+        assert!(failure(ask(&mut engine, &id, Some(&|| Ok(Some("  ".into()))))).contains("API key"));
+        assert!(failure(ask(&mut engine, &id, Some(&|| Err("keyring locked".into())))).contains("keyring locked"));
+        assert_eq!(mock.calls(), 0);
+
+        // with a key the call is deferred, so the shell can make it without the engine lock
+        let out = ask(&mut engine, &id, Some(&stored));
+        assert!(out.response.is_none());
+        assert!(out.deferred.is_some());
+        assert_eq!(mock.calls(), 0);
+        let v = structured(&out.finish().response.unwrap());
+        assert_eq!(mock.calls(), 1);
+        assert_eq!(v["project_id"], id);
+        assert_eq!(v["creator"], "Mock Creator");
+        assert_eq!(v["title"], "Benchy Boat");
+        assert_eq!(v["cached"], false);
+        assert_eq!(v["sent"]["documents"], json!(["README.md"]));
+        assert_eq!(v["sent"]["thumbnail"], false);
+        assert!(v["note"].as_str().unwrap().contains("nothing was written"));
+        // a suggestion is never written
+        assert!(!lib.path().join("benchy boat/project.yaml").exists());
+        assert_eq!(engine.get_project(&id).unwrap().creator, None);
+
+        // the answer is a cache: asking again costs nothing
+        let v = structured(&ask(&mut engine, &id, Some(&stored)).finish().response.unwrap());
+        assert_eq!(v["cached"], true);
+        assert_eq!(mock.calls(), 1);
+
+        // inside a batch it runs in place, so the answers keep their order
+        let vase = format!("{}:Vase", root.id);
+        let batch = handle_with(
+            &mut engine,
+            &json!([
+                { "jsonrpc": "2.0", "id": 1, "method": "tools/call", "params": { "name": "suggest_metadata", "arguments": { "project_id": vase } } },
+                { "jsonrpc": "2.0", "id": 2, "method": "ping" },
+            ]),
+            &mut Session { ai_key: Some(&stored) },
+        );
+        assert!(batch.deferred.is_none());
+        let answers = batch.response.unwrap();
+        assert_eq!(answers[0]["result"]["structuredContent"]["title"], "Vase");
+        assert_eq!(answers[1]["id"], 2);
+
+        // what the provider refuses reaches the agent as the tool's error
+        engine.set_ai_provider(Some(Arc::new(MockProvider::new(MockMode::Unauthorized))));
+        std::fs::write(lib.path().join("Vase/notes.txt"), "changed, so the cached answer no longer applies").unwrap();
+        engine.scan_root(&root.id, |_| {}).unwrap();
+        assert!(failure(ask(&mut engine, &vase, Some(&stored))).contains("rejected the API key"));
+        assert!(failure(ask(&mut engine, "nope", Some(&stored))).contains("project not found"));
     }
 
     #[test]

@@ -141,3 +141,32 @@ project. No subscriptions and no list-changed notifications: the server stays st
 Resources only read, so they sit behind the token and the first switch like the reading
 tools. The preview picture is the one thing they add to what an agent can see; the
 Settings card and the privacy policy name it.
+
+## Amendment 2026-11-20: the in-app AI suggestion as a tool (#101)
+
+An agent that cannot see pictures has no use for a project's preview, and for many
+downloads the preview is the only thing that says what the model is. The app already has
+an assistant that looks at it (ADR-0003). `suggest_metadata` runs that assistant for one
+project and returns its proposal: title, creator, license, description, tags, and what was
+sent for it.
+
+- **A switch of its own, "Allow AI suggestions", off by default.** It is the one tool that
+  makes the app itself call out, and it spends the user's key; neither follows from
+  "Run the MCP server" or from having stored a key for the window. It does not depend on
+  "Allow writes": the tool writes nothing.
+- **ADR-0003 holds on this path.** No key, no request (the same gate, `Engine::ai_provider`);
+  the inputs are the documented ones and no others; the answer is validated by the engine
+  and cached like any other; nothing is written. An agent that wants a proposal in
+  `project.yaml` writes it with `update_metadata`, behind "Allow writes". Principle 1
+  allows a call that is not a click when it is "a job the user switched on in settings
+  with a visible scope": the switch is that setting, and its text says what each request
+  sends and where.
+- **The key stays in the shell.** The engine asks for it through `mcp::Session::ai_key`
+  when a suggestion is requested and passes it to the provider; it is not stored, logged
+  or returned.
+- **The provider is called outside the engine lock.** `mcp::handle_with` returns the
+  request as `Outcome::deferred`; the host releases the engine and then finishes it, as
+  the window's own command does, so the library stays usable while a model thinks.
+
+Point 6 of the decision ("Meshkeep still makes no network request of its own for this")
+now has this one exception, and the Settings card and the privacy policy state it.

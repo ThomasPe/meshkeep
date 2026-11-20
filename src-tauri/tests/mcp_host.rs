@@ -2,7 +2,7 @@
 //! change callback that keeps the window in sync.
 use meshkeep_engine::settings::McpSettings;
 use meshkeep_engine::Engine;
-use meshkeep_lib::mcp_host::Host;
+use meshkeep_lib::mcp_host::{Hooks, Host};
 use std::sync::{Arc, Mutex};
 
 #[test]
@@ -20,13 +20,21 @@ fn serves_mcp_over_http_with_a_token() {
     let engine = Arc::new(Mutex::new(engine));
     let seen = Arc::new(Mutex::new(0usize));
     let counter = seen.clone();
+    let key_reads = Arc::new(Mutex::new(0usize));
+    let asked = key_reads.clone();
     let host = Host::new();
     let port = host
         .start(
             "127.0.0.1:0",
             "secret-token".into(),
             engine.clone(),
-            Arc::new(move |changes| *counter.lock().unwrap() += changes.len()),
+            Hooks {
+                on_change: Arc::new(move |changes| *counter.lock().unwrap() += changes.len()),
+                ai_key: Arc::new(move || {
+                    *asked.lock().unwrap() += 1;
+                    Ok(Some("sk-test".into()))
+                }),
+            },
         )
         .unwrap();
     assert!(port > 0);
@@ -123,6 +131,33 @@ fn serves_mcp_over_http_with_a_token() {
     assert_eq!(v["result"]["structuredContent"]["creator"], "Agent", "{v}");
     assert_eq!(*seen.lock().unwrap(), 1);
     assert!(host.status(0).requests >= 4);
+
+    // the app's AI suggestion over the socket (#101): the key comes from the shell's store,
+    // read only when an agent asks, and the provider is called outside the engine lock
+    assert_eq!(*key_reads.lock().unwrap(), 0);
+    {
+        let mut engine = engine.lock().unwrap();
+        engine.set_ai_provider(Some(Arc::new(meshkeep_engine::ai::MockProvider::new(
+            meshkeep_engine::ai::MockMode::Ok,
+        ))));
+        engine
+            .set_mcp_settings(McpSettings {
+                enabled: true,
+                token: "secret-token".into(),
+                allow_writes: true,
+                allow_ai: true,
+                ..Default::default()
+            })
+            .unwrap();
+    }
+    let body = format!(
+        r#"{{"jsonrpc":"2.0","id":4,"method":"tools/call","params":{{"name":"suggest_metadata","arguments":{{"project_id":"{}:Vase"}}}}}}"#,
+        root.id
+    );
+    let v: serde_json::Value = post(&body, Some("secret-token"), None).json().unwrap();
+    assert_eq!(v["result"]["structuredContent"]["creator"], "Mock Creator", "{v}");
+    assert_eq!(*key_reads.lock().unwrap(), 1);
+    assert_eq!(*seen.lock().unwrap(), 1, "a suggestion is not a change");
 
     // the stdio bridge forwards one line and turns transport trouble into JSON-RPC errors
     let bridge = reqwest::blocking::Client::new();

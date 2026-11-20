@@ -89,7 +89,13 @@ pub fn apply_mcp_settings(app: &AppHandle) {
             }
         }
     });
-    state.mcp.apply(&settings, state.engine.clone(), on_change);
+    // an agent's AI suggestion uses the key the user stored, read when it is needed (#101)
+    let keys = app.clone();
+    let hooks = crate::mcp_host::Hooks {
+        on_change,
+        ai_key: Arc::new(move || keys.state::<AppState>().ai_keys.get()),
+    };
+    state.mcp.apply(&settings, state.engine.clone(), hooks);
 }
 
 /// In test mode with `MESHKEEP_FIXTURE_ROOT` set: register that folder (once) and scan it.
