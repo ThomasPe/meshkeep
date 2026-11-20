@@ -6,7 +6,7 @@ import reactRefresh from 'eslint-plugin-react-refresh';
 import globals from 'globals';
 
 export default tseslint.config(
-  { ignores: ['dist/**', 'target/**', 'node_modules/**', 'spike/**', 'src-tauri/**', 'test-results/**', 'playwright-report/**'] },
+  { ignores: ['dist/**', 'target/**', 'node_modules/**', 'src-tauri/**', 'test-results/**', 'playwright-report/**'] },
   js.configs.recommended,
   ...tseslint.configs.recommended,
   {

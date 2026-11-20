@@ -121,7 +121,6 @@ npm run tauri:build:e2e && npm run test:e2e        # WebdriverIO against the rea
 | `fixtures` | Deterministic sample library and import bundles for tests |
 | `msix`, `docs/store` | Microsoft Store packaging and release pipeline |
 | `site` | The website at meshkeep.app (GitHub Pages) |
-| `spike` | The Tauri de-risking spike from Phase 0, kept as reference |
 
 Rules, conventions and the definition of done for humans and coding agents are in
 [`AGENTS.md`](AGENTS.md).

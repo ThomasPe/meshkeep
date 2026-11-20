@@ -235,7 +235,9 @@ shell-agnostic package, and the UI framework decision in ADR-0002 is unaffected.
 
 ## Spike results (2026-10-17)
 
-Code: `spike/`. CI: `.github/workflows/spike-windows.yml`. Run 1
+Code: `spike/`, CI: `.github/workflows/spike-windows.yml`; both were removed on 2026-11-20
+once the app had replaced them, and are preserved at commit `19988c4` (tag
+`archive/spike`). Run 1
 <https://github.com/ThomasPe/meshkeep/actions/runs/39067620670> and run 2
 <https://github.com/ThomasPe/meshkeep/actions/runs/39069174074> (viewer paused during
 thumbnails), all steps green.
