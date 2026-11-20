@@ -1,6 +1,6 @@
 //! The MCP server's brain (ADR-0004): JSON-RPC messages in, results out. Transport, token
 //! check and threading live in the shell; this module only knows the engine, so every tool
-//! is testable without a socket. Protocol: MCP 2025-06-18, tools and prompts, no resources,
+//! is testable without a socket. Protocol: MCP 2025-06-18, tools, prompts and resources,
 //! stateless (no session ids, no server-initiated messages).
 //!
 //! Tools come in two sets. Reading ones are always on. Writing ones (metadata, imports,
@@ -50,7 +50,9 @@ look at the folders the user opened for imports (downloads); execute_import crea
 hint, a readme or a model page; leave a field alone rather than guess. Deleting tools, when the user allows them, only move to the trash; \
 use dry_run first and tell the user what went. A packed project (`packed` in get_project) keeps its models inside a zip in its folder: its files \
 are listed as `<archive>/<path>` and can be read, but not moved or deleted one by one; unpack_projects extracts them, pack_projects packs loose \
-models, and execute_import with action `packed` adds a zip download without extracting it (smaller on disk, far fewer files to sync).";
+models, and execute_import with action `packed` adds a zip download without extracting it (smaller on disk, far fewer files to sync). \
+Every project is also a resource (meshkeep://project/{id}, listed by resources/list): the same JSON as get_project, with its text files and its \
+preview picture below it.";
 
 /// Handles one message or a batch. Batches get a batch back; a batch of notifications gets
 /// no response at all.
@@ -107,7 +109,11 @@ fn handle_one(engine: &mut Engine, message: &Value) -> Outcome {
             };
             Ok(json!({
                 "protocolVersion": PROTOCOL_VERSION,
-                "capabilities": { "tools": { "listChanged": false }, "prompts": { "listChanged": false } },
+                "capabilities": {
+                    "tools": { "listChanged": false },
+                    "prompts": { "listChanged": false },
+                    "resources": { "subscribe": false, "listChanged": false },
+                },
                 "serverInfo": server_info(),
                 "instructions": instructions,
             }))
@@ -140,14 +146,21 @@ fn handle_one(engine: &mut Engine, message: &Value) -> Outcome {
             })
         }
         "prompts/list" => Ok(json!({ "prompts": prompts() })),
-        "prompts/get" => prompt(params.get("name").and_then(|n| n.as_str()).unwrap_or(""), params.get("arguments")),
-        "resources/list" => Ok(json!({ "resources": [] })),
-        "resources/templates/list" => Ok(json!({ "resourceTemplates": [] })),
-        _ => Err(format!("method not found: {method}")),
+        "prompts/get" => prompt(params.get("name").and_then(|n| n.as_str()).unwrap_or(""), params.get("arguments")).map_err(RpcError::from),
+        "resources/list" => list_resources(engine, params.get("cursor")),
+        "resources/templates/list" => Ok(json!({ "resourceTemplates": resource_templates() })),
+        "resources/read" => read_resource(engine, params.get("uri").and_then(|u| u.as_str()).unwrap_or("")),
+        _ => Err(RpcError::from(format!("method not found: {method}"))),
     };
     let response = match result {
         Ok(result) => json!({ "jsonrpc": "2.0", "id": id, "result": result }),
-        Err(msg) => error_response(id, -32601, &msg),
+        Err(e) => {
+            let mut r = error_response(id, e.code, &e.message);
+            if let Some(data) = e.data {
+                r["error"]["data"] = data;
+            }
+            r
+        }
     };
     Outcome {
         response: Some(response),
@@ -157,6 +170,41 @@ fn handle_one(engine: &mut Engine, message: &Value) -> Outcome {
 
 fn error_response(id: Value, code: i64, message: &str) -> Value {
     json!({ "jsonrpc": "2.0", "id": id, "error": { "code": code, "message": message } })
+}
+
+/// A protocol-level failure (as opposed to a tool that ran and failed).
+struct RpcError {
+    code: i64,
+    message: String,
+    data: Option<Value>,
+}
+
+impl RpcError {
+    fn invalid_params(message: impl Into<String>) -> RpcError {
+        RpcError {
+            code: -32602,
+            message: message.into(),
+            data: None,
+        }
+    }
+    /// MCP's own code for a resource that does not exist.
+    fn resource_not_found(uri: &str) -> RpcError {
+        RpcError {
+            code: -32002,
+            message: format!("resource not found: {uri}"),
+            data: Some(json!({ "uri": uri })),
+        }
+    }
+}
+
+impl From<String> for RpcError {
+    fn from(message: String) -> Self {
+        RpcError {
+            code: -32601,
+            message,
+            data: None,
+        }
+    }
 }
 
 enum ToolError {
@@ -547,6 +595,227 @@ Work project by project:\n\
     )
 }
 
+// ---- resources (#100) -------------------------------------------------------------------
+//
+// For clients that browse instead of calling tools: every project is a resource, its text
+// files and its preview hang below it. Reading only, so nothing beyond the token applies.
+//
+//   meshkeep://project/{id}                 the project as JSON (what get_project returns)
+//   meshkeep://project/{id}/file/{+path}    a text file of the project (what read_project_file reads)
+//   meshkeep://project/{id}/thumbnail       the cached preview picture, PNG
+//
+// The id is one path segment: `:` and `/` inside it are percent-encoded.
+
+const PROJECT_URI: &str = "meshkeep://project/";
+const RESOURCE_PAGE: u32 = 100;
+
+/// Percent-encodes everything outside RFC 3986's unreserved set; `keep_slash` leaves the
+/// separators of a relative path alone.
+fn uri_encode(s: &str, keep_slash: bool) -> String {
+    let mut out = String::with_capacity(s.len());
+    for b in s.bytes() {
+        if b.is_ascii_alphanumeric() || matches!(b, b'-' | b'.' | b'_' | b'~') || (keep_slash && b == b'/') {
+            out.push(b as char);
+        } else {
+            out.push_str(&format!("%{b:02X}"));
+        }
+    }
+    out
+}
+
+fn uri_decode(s: &str) -> Option<String> {
+    let bytes = s.as_bytes();
+    let mut out = Vec::with_capacity(bytes.len());
+    let mut i = 0;
+    while i < bytes.len() {
+        if bytes[i] == b'%' {
+            let hex = s.get(i + 1..i + 3)?;
+            out.push(u8::from_str_radix(hex, 16).ok()?);
+            i += 3;
+        } else {
+            out.push(bytes[i]);
+            i += 1;
+        }
+    }
+    String::from_utf8(out).ok()
+}
+
+/// The resource URI of a project.
+pub fn project_uri(id: &str) -> String {
+    format!("{PROJECT_URI}{}", uri_encode(id, false))
+}
+
+fn file_uri(id: &str, rel: &str) -> String {
+    format!("{}/file/{}", project_uri(id), uri_encode(rel, true))
+}
+
+fn thumbnail_uri(id: &str) -> String {
+    format!("{}/thumbnail", project_uri(id))
+}
+
+fn resource_templates() -> Vec<Value> {
+    vec![
+        json!({
+            "uriTemplate": "meshkeep://project/{id}",
+            "name": "project",
+            "title": "Project",
+            "description": "One project as JSON: metadata, files, the folder path, hints and the model page link. The id comes from search_projects or resources/list.",
+            "mimeType": "application/json",
+        }),
+        json!({
+            "uriTemplate": "meshkeep://project/{id}/file/{+path}",
+            "name": "project-file",
+            "title": "Project file",
+            "description": "A text file inside a project (readme, license note, .url shortcut), up to 256 KiB. The path is relative to the project folder.",
+        }),
+        json!({
+            "uriTemplate": "meshkeep://project/{id}/thumbnail",
+            "name": "project-thumbnail",
+            "title": "Project preview",
+            "description": "The project's preview picture as the app shows it, when one has been rendered.",
+            "mimeType": "image/png",
+        }),
+    ]
+}
+
+/// One page of projects, by title. The cursor is the offset of the next page.
+fn list_resources(engine: &Engine, cursor: Option<&Value>) -> std::result::Result<Value, RpcError> {
+    let offset = match cursor {
+        None | Some(Value::Null) => 0,
+        Some(c) => c
+            .as_str()
+            .and_then(|c| c.parse::<u32>().ok())
+            .ok_or_else(|| RpcError::invalid_params("invalid cursor"))?,
+    };
+    let q = ListQuery {
+        sort: SortKey::Title,
+        limit: Some(RESOURCE_PAGE),
+        offset: Some(offset),
+        ..Default::default()
+    };
+    let items = engine.list_projects(&q).map_err(|e| RpcError {
+        code: -32603,
+        message: e.to_string(),
+        data: None,
+    })?;
+    let mut out = json!({
+        "resources": items.iter().map(|p| {
+            let mut about = Vec::new();
+            if let Some(c) = p.creator.as_deref().filter(|c| !c.is_empty()) {
+                about.push(format!("by {c}"));
+            }
+            about.push(format!("{} model file{}", p.model_count, if p.model_count == 1 { "" } else { "s" }));
+            if !p.tags.is_empty() {
+                about.push(p.tags.join(", "));
+            }
+            json!({
+                "uri": project_uri(&p.id),
+                "name": if p.rel_path.is_empty() { p.title.as_str() } else { p.rel_path.as_str() },
+                "title": p.title,
+                "description": about.join(" · "),
+                "mimeType": "application/json",
+            })
+        }).collect::<Vec<_>>(),
+    });
+    if items.len() as u32 == RESOURCE_PAGE {
+        out["nextCursor"] = json!((offset + RESOURCE_PAGE).to_string());
+    }
+    Ok(out)
+}
+
+enum ProjectPart {
+    Details,
+    File(String),
+    Thumbnail,
+}
+
+/// Splits a resource URI into the project id and what is asked of it. A client that did
+/// not encode the id (`meshkeep://project/<root>:<folder>/<sub>`) is understood too, as long
+/// as that names a project.
+fn parse_project_uri(engine: &Engine, uri: &str) -> Option<(Project, ProjectPart)> {
+    let rest = uri.strip_prefix(PROJECT_URI)?;
+    let (id, tail) = match rest.split_once('/') {
+        Some((id, tail)) => (id, Some(tail)),
+        None => (rest, None),
+    };
+    let part = match tail {
+        None | Some("") => Some(ProjectPart::Details),
+        Some("thumbnail") => Some(ProjectPart::Thumbnail),
+        Some(t) => t
+            .strip_prefix("file/")
+            .and_then(uri_decode)
+            .filter(|rel| !rel.is_empty())
+            .map(ProjectPart::File),
+    };
+    if let (Some(part), Some(p)) = (part, uri_decode(id).and_then(|id| engine.get_project(&id).ok())) {
+        return Some((p, part));
+    }
+    let p = engine.get_project(&uri_decode(rest)?).ok()?;
+    Some((p, ProjectPart::Details))
+}
+
+/// Files worth offering to a browsing client as text: small, and named like text.
+fn looks_textual(rel: &str, size: u64) -> bool {
+    let name = rel.rsplit('/').next().unwrap_or(rel).to_ascii_lowercase();
+    let textual = match name.rsplit_once('.') {
+        Some((_, ext)) => matches!(
+            ext,
+            "txt" | "md" | "markdown" | "url" | "readme" | "json" | "yaml" | "yml" | "html" | "htm" | "csv" | "ini" | "cfg"
+        ),
+        None => matches!(name.as_str(), "readme" | "license" | "licence" | "copying" | "notes"),
+    };
+    textual && size <= MAX_TEXT_BYTES
+}
+
+fn text_mime(rel: &str) -> &'static str {
+    match rel.rsplit('.').next().unwrap_or("").to_ascii_lowercase().as_str() {
+        "md" | "markdown" => "text/markdown",
+        "json" => "application/json",
+        "yaml" | "yml" => "application/yaml",
+        "html" | "htm" => "text/html",
+        _ => "text/plain",
+    }
+}
+
+fn read_resource(engine: &Engine, uri: &str) -> std::result::Result<Value, RpcError> {
+    use base64::Engine as _;
+    let (p, part) = parse_project_uri(engine, uri).ok_or_else(|| RpcError::resource_not_found(uri))?;
+    let content = match part {
+        ProjectPart::Details => {
+            let mut v = project_details(engine, &p);
+            // where a browsing client goes next
+            v["thumbnail_uri"] = json!(p.thumb.as_ref().map(|_| thumbnail_uri(&p.id)));
+            if let Some(files) = v["files"].as_array_mut() {
+                for (f, entry) in files.iter_mut().zip(&p.files) {
+                    if looks_textual(&entry.rel_path, entry.size) {
+                        f["uri"] = json!(file_uri(&p.id, &entry.rel_path));
+                    }
+                }
+            }
+            json!({ "uri": uri, "mimeType": "application/json", "text": serde_json::to_string_pretty(&v).unwrap_or_default() })
+        }
+        ProjectPart::File(rel) => {
+            if !p.files.iter().any(|f| f.rel_path == rel) {
+                return Err(RpcError::resource_not_found(uri));
+            }
+            let text = project_file_text(engine, &p.id, &rel).map_err(|e| match e {
+                ToolError::Failed(m) | ToolError::Unknown(m) => RpcError::invalid_params(m),
+            })?;
+            json!({ "uri": uri, "mimeType": text_mime(&rel), "text": text })
+        }
+        ProjectPart::Thumbnail => {
+            let png = p
+                .thumb
+                .as_deref()
+                .and_then(|key| engine.thumbnail_path(key).ok())
+                .and_then(|path| std::fs::read(path).ok())
+                .ok_or_else(|| RpcError::resource_not_found(uri))?;
+            json!({ "uri": uri, "mimeType": "image/png", "blob": base64::engine::general_purpose::STANDARD.encode(png) })
+        }
+    };
+    Ok(json!({ "contents": [content] }))
+}
+
 // ---- argument helpers -------------------------------------------------------------------
 
 fn arg_str(args: &Value, key: &str) -> Option<String> {
@@ -664,39 +933,13 @@ fn call_tool(engine: &mut Engine, name: &str, args: &Value, changes: &mut Vec<Ch
         "get_project" => {
             let id = need_str(args, "project_id")?;
             let p = engine.get_project(&id)?;
-            let mut v = project_view(engine, &p);
-            if let Ok(h) = engine.project_hints(&id) {
-                v["hints"] = json!({
-                    "creator": h.creator.iter().map(hint_view).collect::<Vec<_>>(),
-                    "license": h.license.iter().map(hint_view).collect::<Vec<_>>(),
-                    "source_url": h.source_url.iter().map(hint_view).collect::<Vec<_>>(),
-                });
-            }
-            v["model_page_url"] = json!(engine.model_page_url(&id).ok().flatten());
-            Ok(v)
+            Ok(project_details(engine, &p))
         }
         "read_project_file" => {
             let id = need_str(args, "project_id")?;
             let rel = need_str(args, "rel_path")?;
-            let located = engine.locate(&id, &rel)?;
-            let size = match &located {
-                crate::packed::Located::Disk(path) => std::fs::metadata(path).map_err(|e| e.to_string())?.len(),
-                crate::packed::Located::Packed { .. } => engine
-                    .get_project(&id)?
-                    .files
-                    .iter()
-                    .find(|f| f.rel_path == rel)
-                    .map(|f| f.size)
-                    .ok_or_else(|| ToolError::Failed(format!("{rel} is not in the packed archive")))?,
-            };
-            if size > MAX_TEXT_BYTES {
-                return Err(format!("{rel} is {size} bytes; only text files up to {MAX_TEXT_BYTES} bytes are read").into());
-            }
-            let bytes = located.read()?;
-            if bytes.iter().take(4096).filter(|b| **b == 0).count() > 0 {
-                return Err(format!("{rel} is not a text file").into());
-            }
-            Ok(json!({ "rel_path": rel, "text": String::from_utf8_lossy(&bytes) }))
+            let text = project_file_text(engine, &id, &rel)?;
+            Ok(json!({ "rel_path": rel, "text": text }))
         }
         "fetch_model_page" => {
             let s = match (arg_str(args, "project_id"), arg_str(args, "url")) {
@@ -1183,10 +1426,47 @@ fn call_tool(engine: &mut Engine, name: &str, args: &Value, changes: &mut Vec<Ch
     }
 }
 
+/// The text of a project file, loose or inside a packed archive; refuses big and binary files.
+fn project_file_text(engine: &Engine, id: &str, rel: &str) -> std::result::Result<String, ToolError> {
+    let located = engine.locate(id, rel)?;
+    let size = match &located {
+        crate::packed::Located::Disk(path) => std::fs::metadata(path).map_err(|e| e.to_string())?.len(),
+        crate::packed::Located::Packed { .. } => engine
+            .get_project(id)?
+            .files
+            .iter()
+            .find(|f| f.rel_path == rel)
+            .map(|f| f.size)
+            .ok_or_else(|| ToolError::Failed(format!("{rel} is not in the packed archive")))?,
+    };
+    if size > MAX_TEXT_BYTES {
+        return Err(format!("{rel} is {size} bytes; only text files up to {MAX_TEXT_BYTES} bytes are read").into());
+    }
+    let bytes = located.read()?;
+    if bytes.iter().take(4096).filter(|b| **b == 0).count() > 0 {
+        return Err(format!("{rel} is not a text file").into());
+    }
+    Ok(String::from_utf8_lossy(&bytes).into_owned())
+}
+
 const NO_IMPORT_DIRS: &str = "no import folders are configured; the user can add one in Settings → MCP server";
 
 fn hint_view(h: &crate::hints::Hint) -> Value {
     json!({ "value": h.value, "source": h.source, "confidence": h.confidence })
+}
+
+/// `project_view` plus what `get_project` adds: the hints and the model page link.
+fn project_details(engine: &Engine, p: &Project) -> Value {
+    let mut v = project_view(engine, p);
+    if let Ok(h) = engine.project_hints(&p.id) {
+        v["hints"] = json!({
+            "creator": h.creator.iter().map(hint_view).collect::<Vec<_>>(),
+            "license": h.license.iter().map(hint_view).collect::<Vec<_>>(),
+            "source_url": h.source_url.iter().map(hint_view).collect::<Vec<_>>(),
+        });
+    }
+    v["model_page_url"] = json!(engine.model_page_url(&p.id).ok().flatten());
+    v
 }
 
 fn project_view(engine: &Engine, p: &Project) -> Value {
@@ -1339,6 +1619,145 @@ mod tests {
                 .unwrap()["result"]["resources"],
             json!([])
         );
+    }
+
+    fn rpc(engine: &mut Engine, method: &str, params: Value) -> Value {
+        handle(engine, &json!({ "jsonrpc": "2.0", "id": 1, "method": method, "params": params }))
+            .response
+            .unwrap()
+    }
+
+    /// #100: projects are resources a client can list, page through and read, with their
+    /// text files and preview below them.
+    #[test]
+    fn projects_are_resources() {
+        let data = tempfile::tempdir().unwrap();
+        let lib = tempfile::tempdir().unwrap();
+        touch(&lib.path().join("Maker/Dragon Egg/egg.stl"), 10);
+        std::fs::write(lib.path().join("Maker/Dragon Egg/README.md"), "# Dragon Egg\nby Maker").unwrap();
+        std::fs::write(lib.path().join("Maker/Dragon Egg/print.pdf"), b"%PDF\0\0").unwrap();
+        touch(&lib.path().join("Vase/vase.stl"), 20);
+        let mut engine = Engine::open(data.path()).unwrap();
+        let root = engine.add_root(lib.path(), SyncMode::Manual).unwrap();
+        engine.scan_root(&root.id, |_| {}).unwrap();
+        let id = format!("{}:Maker/Dragon Egg", root.id);
+
+        let init = rpc(&mut engine, "initialize", json!({}));
+        assert_eq!(init["result"]["capabilities"]["resources"]["subscribe"], false);
+        assert!(init["result"]["instructions"].as_str().unwrap().contains("meshkeep://project/"));
+
+        let list = rpc(&mut engine, "resources/list", json!({}));
+        let resources = list["result"]["resources"].as_array().unwrap();
+        assert_eq!(resources.len(), 2);
+        assert!(list["result"].get("nextCursor").is_none(), "one page holds them all");
+        let egg = &resources[0];
+        assert_eq!(egg["title"], "Dragon Egg");
+        assert_eq!(egg["name"], "Maker/Dragon Egg");
+        assert_eq!(egg["mimeType"], "application/json");
+        let uri = egg["uri"].as_str().unwrap();
+        assert_eq!(uri, project_uri(&id));
+        assert!(
+            !uri["meshkeep://project/".len()..].contains(['/', ':', ' ']),
+            "the id is one encoded segment: {uri}"
+        );
+        assert_eq!(
+            rpc(&mut engine, "resources/list", json!({ "cursor": "nope" }))["error"]["code"],
+            -32602
+        );
+        assert_eq!(
+            rpc(&mut engine, "resources/list", json!({ "cursor": "100" }))["result"]["resources"],
+            json!([])
+        );
+
+        let templates = rpc(&mut engine, "resources/templates/list", json!({}));
+        let templates: Vec<&str> = templates["result"]["resourceTemplates"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|t| t["uriTemplate"].as_str().unwrap())
+            .collect();
+        assert_eq!(
+            templates,
+            [
+                "meshkeep://project/{id}",
+                "meshkeep://project/{id}/file/{+path}",
+                "meshkeep://project/{id}/thumbnail"
+            ]
+        );
+
+        // the project reads as the JSON get_project returns, plus where to go next
+        let read = rpc(&mut engine, "resources/read", json!({ "uri": uri }));
+        let content = &read["result"]["contents"][0];
+        assert_eq!(content["uri"], uri);
+        assert_eq!(content["mimeType"], "application/json");
+        let project: Value = serde_json::from_str(content["text"].as_str().unwrap()).unwrap();
+        assert_eq!(project["id"], id);
+        assert!(project["hints"].is_object());
+        assert_eq!(project["thumbnail_uri"], Value::Null, "no preview rendered yet");
+        let files = project["files"].as_array().unwrap();
+        let readme = files.iter().find(|f| f["rel_path"] == "README.md").unwrap();
+        assert!(files.iter().find(|f| f["rel_path"] == "egg.stl").unwrap().get("uri").is_none());
+        assert!(files.iter().find(|f| f["rel_path"] == "print.pdf").unwrap().get("uri").is_none());
+        // an unencoded id works too
+        let raw = rpc(&mut engine, "resources/read", json!({ "uri": format!("meshkeep://project/{id}") }));
+        assert_eq!(raw["result"]["contents"][0]["mimeType"], "application/json", "{raw}");
+
+        // a text file
+        let text = rpc(&mut engine, "resources/read", json!({ "uri": readme["uri"] }));
+        assert_eq!(text["result"]["contents"][0]["mimeType"], "text/markdown");
+        assert!(text["result"]["contents"][0]["text"].as_str().unwrap().contains("by Maker"));
+        let binary = rpc(&mut engine, "resources/read", json!({ "uri": format!("{uri}/file/print.pdf") }));
+        assert_eq!(binary["error"]["code"], -32602);
+        assert!(binary["error"]["message"].as_str().unwrap().contains("not a text file"));
+
+        // the preview, once one exists
+        let none = rpc(&mut engine, "resources/read", json!({ "uri": format!("{uri}/thumbnail") }));
+        assert_eq!(none["error"]["code"], -32002);
+        let png_bytes = b"\x89PNG\r\n\x1a\nnot really a picture";
+        engine.store_thumbnail(&id, png_bytes).unwrap();
+        let read = rpc(&mut engine, "resources/read", json!({ "uri": uri }));
+        let project: Value = serde_json::from_str(read["result"]["contents"][0]["text"].as_str().unwrap()).unwrap();
+        let thumb = project["thumbnail_uri"].as_str().unwrap();
+        let png = rpc(&mut engine, "resources/read", json!({ "uri": thumb }));
+        assert_eq!(png["result"]["contents"][0]["mimeType"], "image/png");
+        use base64::Engine as _;
+        assert_eq!(
+            png["result"]["contents"][0]["blob"],
+            base64::engine::general_purpose::STANDARD.encode(png_bytes)
+        );
+
+        // what does not exist says so with MCP's code, and nothing outside a project is reachable
+        for missing in [
+            "meshkeep://project/nope".to_string(),
+            format!("{uri}/file/missing.txt"),
+            format!("{uri}/file/..%2F..%2FVase%2Fvase.stl"),
+            format!("{uri}/other"),
+            "file:///etc/passwd".to_string(),
+        ] {
+            let r = rpc(&mut engine, "resources/read", json!({ "uri": missing }));
+            assert_eq!(r["error"]["code"], -32002, "{missing}: {r}");
+            assert_eq!(r["error"]["data"]["uri"], missing);
+        }
+    }
+
+    #[test]
+    fn resource_lists_page_with_a_cursor() {
+        let data = tempfile::tempdir().unwrap();
+        let lib = tempfile::tempdir().unwrap();
+        for i in 0..(RESOURCE_PAGE + 5) {
+            touch(&lib.path().join(format!("P{i:03}/part.stl")), 4);
+        }
+        let mut engine = Engine::open(data.path()).unwrap();
+        let root = engine.add_root(lib.path(), SyncMode::Manual).unwrap();
+        engine.scan_root(&root.id, |_| {}).unwrap();
+        let first = rpc(&mut engine, "resources/list", json!({}));
+        assert_eq!(first["result"]["resources"].as_array().unwrap().len(), RESOURCE_PAGE as usize);
+        let cursor = first["result"]["nextCursor"].clone();
+        assert!(cursor.is_string());
+        let second = rpc(&mut engine, "resources/list", json!({ "cursor": cursor }));
+        assert_eq!(second["result"]["resources"].as_array().unwrap().len(), 5);
+        assert!(second["result"].get("nextCursor").is_none());
+        assert_eq!(second["result"]["resources"][0]["title"], "P100");
     }
 
     #[test]

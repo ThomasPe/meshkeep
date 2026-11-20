@@ -401,7 +401,7 @@
     "mcpCopy": "Kopieren",
     "mcpCopied": "Kopiert",
     "mcpCopyFailed": "Kopieren nicht möglich; markiere den Text stattdessen",
-    "mcpSent": "Was ein Agent sieht: alles, was die Werkzeuge zurückgeben, also deine Projekt-Metadaten, Dateinamen, Readme-Texte, die oben gelisteten Ordner und, mit „Modellseiten laden“, deren Inhalt. Wohin der Agent das schickt, hängt vom verbundenen Client und dessen Datenschutzregeln ab. Meshkeep selbst sendet nichts.",
+    "mcpSent": "Was ein Agent sieht: alles, was die Werkzeuge zurückgeben, also deine Projekt-Metadaten, Dateinamen, Readme-Texte, die Vorschaubilder, die oben gelisteten Ordner und, mit „Modellseiten laden“, deren Inhalt. Wohin der Agent das schickt, hängt vom verbundenen Client und dessen Datenschutzregeln ab. Meshkeep selbst sendet nichts.",
     "mcpDeletes": "Löschen erlauben (in den Papierkorb)",
     "mcpDeletesNeedsWrites": "Braucht zuerst „Schreiben erlauben“.",
     "mcpDeletesHintOn": "An: Agenten dürfen Dateien und ganze Projekte in den Papierkorb legen, auch Duplikate, die sie auflösen. Nichts wird endgültig gelöscht; der Papierkorb behält es.",

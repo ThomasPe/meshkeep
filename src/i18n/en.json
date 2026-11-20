@@ -401,7 +401,7 @@
     "mcpCopy": "Copy",
     "mcpCopied": "Copied",
     "mcpCopyFailed": "Could not copy; select the text instead",
-    "mcpSent": "What an agent sees: whatever the tools return, which is your project metadata, file names, readme text, the folders you listed above and, with “Load model pages” on, what those pages say. Where the agent sends it depends on the client you connect and its own privacy policy. Meshkeep itself sends nothing anywhere.",
+    "mcpSent": "What an agent sees: whatever the tools return, which is your project metadata, file names, readme text, the preview pictures, the folders you listed above and, with “Load model pages” on, what those pages say. Where the agent sends it depends on the client you connect and its own privacy policy. Meshkeep itself sends nothing anywhere.",
     "mcpDeletes": "Allow deleting (to the trash)",
     "mcpDeletesNeedsWrites": "Needs “Allow writes” first.",
     "mcpDeletesHintOn": "On: agents can move files and whole projects to the recycle bin, including duplicates they resolve. Nothing is deleted permanently; the recycle bin keeps it.",

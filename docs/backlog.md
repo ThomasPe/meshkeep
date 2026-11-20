@@ -274,10 +274,15 @@ cost estimate, import proposals in the staging dialog (see ADR-0003, features 4,
       every write; MCP `initialize` carries the rules, `get_conventions`, `check_conventions`,
       `organize`. Not yet: the import dialog proposing the destination from the layout, an
       "Organize" button in the window, more placeholders.
-- [ ] **Follow-ups.** Resources (`meshkeep://project/{id}`) for clients that browse;
-      a tool for the in-app AI suggestion so an agent without its own eyes can use the
-      thumbnail; progress notifications for long tools (duplicates, imports with pages);
-      an audit view of what agents changed (reuse the undo log once APP-6 exists).
+- [x] **Resources for clients that browse** (#100, ADR-0004 amendment). Every project is
+      `meshkeep://project/{id}` (the JSON of `get_project`), with its text files
+      (`…/file/{+path}`) and its preview (`…/thumbnail`, PNG) below it; `resources/list`
+      pages by title, `resources/templates/list`, `resources/read`. Read-only, no
+      subscriptions.
+- [ ] **Follow-ups.** A tool for the in-app AI suggestion so an agent without its own
+      eyes can use the thumbnail; progress notifications for long tools (duplicates,
+      imports with pages); an audit view of what agents changed (reuse the undo log once
+      APP-6 exists).
 
 ## Phase 3: Model tools
 - [ ] **Transforms & mesh analysis** (VIEW-7).

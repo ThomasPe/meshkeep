@@ -120,3 +120,24 @@ They use the trash but lose no content, which is why they sit with the writing t
 not behind "Allow deleting". `get_project` reports `packed` and lists archive entries as
 `<archive>/<path>`; `read_project_file` reads them; `move_files`, `delete_file` and
 `remove_shared_files` refuse them and say to unpack first.
+
+## Amendment 2026-11-20: resources for clients that browse (#100)
+
+Some clients do not call tools on their own; they show the user what a server offers and
+attach what the user picks. For them every project is now a resource:
+
+- `meshkeep://project/{id}`: the project as JSON, the same view `get_project` returns,
+  plus the URIs of its preview and of its text files.
+- `meshkeep://project/{id}/file/{+path}`: a text file of the project, under the limits of
+  `read_project_file` (256 KiB, text only, packed entries included).
+- `meshkeep://project/{id}/thumbnail`: the cached preview as PNG, when one was rendered.
+
+`resources/list` pages through the projects by title (100 per page, the cursor is opaque
+to the client), `resources/templates/list` names the three forms, `resources/read` answers
+them and reports an unknown URI with MCP's code -32002. The id is a single path segment,
+so its `:` and `/` are percent-encoded; an unencoded id is understood as long as it names a
+project. No subscriptions and no list-changed notifications: the server stays stateless.
+
+Resources only read, so they sit behind the token and the first switch like the reading
+tools. The preview picture is the one thing they add to what an agent can see; the
+Settings card and the privacy policy name it.
