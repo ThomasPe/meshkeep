@@ -73,7 +73,7 @@ Made for people who print a lot and have folders full of models they can no long
 **Category:** Productivity (secondary: Utilities & tools)
 
 **Copyright and trademark info:** © Thomas Pentenrieder. Source available under the
-PolyForm Noncommercial License 1.0.0 (github.com/ThomasPe/my-meshes).
+PolyForm Noncommercial License 1.0.0 (github.com/ThomasPe/meshkeep).
 
 ## Deutsch
 

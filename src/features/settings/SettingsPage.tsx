@@ -174,7 +174,7 @@ export function SettingsPage({ scanning, onScanEnd }: { scanning: ScanState; onS
         </Card>
 
         <Card title={t('settings.feedback')} hint={t('settings.feedbackHint')} action={<Button size="sm" variant="outline" onClick={() => openFeedback()} data-testid="send-feedback"><Bug />{t('settings.sendFeedback')}</Button>}>
-          <div className="text-[13px] font-semibold text-secondary-foreground"><a className="underline-offset-2 hover:underline" href="https://github.com/ThomasPe/my-meshes/issues" target="_blank" rel="noreferrer">github.com/ThomasPe/my-meshes/issues</a></div>
+          <div className="text-[13px] font-semibold text-secondary-foreground"><a className="underline-offset-2 hover:underline" href="https://github.com/ThomasPe/meshkeep/issues" target="_blank" rel="noreferrer">github.com/ThomasPe/meshkeep/issues</a></div>
         </Card>
 
         <Card title={t('settings.about')}>
