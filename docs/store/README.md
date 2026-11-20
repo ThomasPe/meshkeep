@@ -74,6 +74,13 @@ produced by `release.yml` on tags. Store builds have no updater at all.
 
 `.github/workflows/release.yml` runs on every `v*` tag:
 
+0. **Identity gate.** Before anything is built, `msix/check-store-identity.ps1` checks the
+   three repository variables with the Partner Center identity (below). A tag without
+   them, or with a publisher that does not start with `CN=`, fails the run at once: the
+   workflow used to fall back to the side-load identity and attach a "Store" MSIX that
+   Partner Center rejects on upload. A manual run from a branch ("Run workflow") only warns
+   and packs with the side-load identity, which is enough to try the pipeline. CI runs the
+   gate's cases on every push (`msix/check-store-identity.test.ps1`).
 1. **Private installer.** `tauri-apps/tauri-action` builds the NSIS installer. When the
    secrets `TAURI_SIGNING_PRIVATE_KEY` and `TAURI_SIGNING_PRIVATE_KEY_PASSWORD` exist, the
    build carries the updater and the action publishes `latest.json` plus `.sig` files next
@@ -134,7 +141,8 @@ Status: account created and the name **Meshkeep** reserved (2026-10-19); the dom
    - `MSIX_PUBLISHER` = `Package/Identity/Publisher` (`CN=<GUID>`)
    - `MSIX_PUBLISHER_DISPLAY_NAME` = `Package/Properties/PublisherDisplayName`
 4. Tag a release; upload `Meshkeep_<version>_x64_store.msix` from the release in the
-   Packages step of the submission.
+   Packages step of the submission. Until step 3 is done, a tag fails in the identity gate
+   and produces no release at all, the private installer included.
 
 ### Submission checklist
 

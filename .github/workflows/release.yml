@@ -22,6 +22,18 @@ jobs:
     defaults: { run: { shell: pwsh } }
     steps:
       - uses: actions/checkout@v5
+
+      # 0. Before anything is built: a tag without the Partner Center identity stops here,
+      #    instead of attaching a "Store" MSIX with the side-load identity to the release.
+      #    A manual run from a branch only warns (msix/check-store-identity.ps1).
+      - name: Partner Center identity
+        id: identity
+        env:
+          MSIX_IDENTITY_NAME: ${{ vars.MSIX_IDENTITY_NAME }}
+          MSIX_PUBLISHER: ${{ vars.MSIX_PUBLISHER }}
+          MSIX_PUBLISHER_DISPLAY_NAME: ${{ vars.MSIX_PUBLISHER_DISPLAY_NAME }}
+        run: ./msix/check-store-identity.ps1
+
       - uses: actions/setup-node@v5
         with: { node-version: 22, cache: npm }
       - uses: dtolnay/rust-toolchain@stable
@@ -66,7 +78,17 @@ jobs:
       - name: Store build
         run: npm run tauri:build:store
       - name: MSIX for Partner Center (unsigned)
-        run: ./msix/build-msix.ps1 -Store -Version "${{ steps.ver.outputs.msix }}" -IdentityName "${{ vars.MSIX_IDENTITY_NAME || 'DevSym.Meshkeep' }}" -Publisher "${{ vars.MSIX_PUBLISHER || 'CN=DevSym Dev' }}" -PublisherDisplayName "${{ vars.MSIX_PUBLISHER_DISPLAY_NAME || 'DevSym' }}"
+        env:
+          MSIX_IDENTITY_NAME: ${{ vars.MSIX_IDENTITY_NAME }}
+          MSIX_PUBLISHER: ${{ vars.MSIX_PUBLISHER }}
+          MSIX_PUBLISHER_DISPLAY_NAME: ${{ vars.MSIX_PUBLISHER_DISPLAY_NAME }}
+        run: |
+          if ("${{ steps.identity.outputs.configured }}" -eq "true") {
+            ./msix/build-msix.ps1 -Store -Version "${{ steps.ver.outputs.msix }}" -IdentityName $env:MSIX_IDENTITY_NAME -Publisher $env:MSIX_PUBLISHER -PublisherDisplayName $env:MSIX_PUBLISHER_DISPLAY_NAME
+          } else {
+            # Manual run without the identity (step 0 warned): side-load identity, not for upload.
+            ./msix/build-msix.ps1 -Store -Version "${{ steps.ver.outputs.msix }}"
+          }
       - name: MSIX side-load build + install round trip
         run: |
           ./msix/build-msix.ps1 -Version "${{ steps.ver.outputs.msix }}"
