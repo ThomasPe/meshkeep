@@ -1,5 +1,6 @@
 import { Bell, Bug, Copy, Download, Eye, EyeOff, FolderOpen, Globe, HardDrive, Images, KeyRound, ListChecks, Loader2, Monitor, Moon, PencilLine, Plug, Plus, RefreshCw, Sparkles, Sun, Trash2, X } from 'lucide-react';
 import { useState } from 'react';
+import { hotkeyCaps, hotkeysFor, type HotkeyAction } from '@/lib/hotkeys';
 import { useTranslation } from 'react-i18next';
 import { toast } from 'sonner';
 import type { ScanState } from '@/App';
@@ -157,6 +158,8 @@ export function SettingsPage({ scanning, onScanEnd }: { scanning: ScanState; onS
             </Select>
           </Row>
         </Card>
+
+        <ShortcutsCard />
 
         <Card title={t('settings.updates')} hint={info.data?.store ? t('settings.updatesStore') : info.data?.updater ? (info.data.channel === 'dev' ? t('settings.updatesDevChannel') : t('settings.updatesPrivate')) : t('settings.updatesDev')} action={info.data?.updater ? <Button size="sm" variant="outline" disabled={update.state === 'checking' || update.state === 'installing'} onClick={() => void checkUpdate()} data-testid="check-update"><Download />{t('settings.checkUpdate')}</Button> : undefined}>
           <div className="text-[13px] font-semibold text-secondary-foreground" data-testid="update-status">
@@ -451,6 +454,31 @@ const INTERVALS = [1, 5, 15, 30, 60, 180];
 function nearestInterval(secs: number): number {
   const m = secs / 60;
   return (INTERVALS.find((x) => x >= m) ?? INTERVALS[INTERVALS.length - 1]!) * 60;
+}
+
+const SHORTCUT_ACTIONS: HotkeyAction[] = ['selectAll', 'open', 'rename', 'delete', 'clearSelection', 'focusSearch'];
+
+/** The shortcuts of the library, read from the key map so the list cannot drift from it (#68). */
+function ShortcutsCard() {
+  const { t } = useTranslation();
+  return (
+    <Card title={t('hotkeys.title')} hint={t('hotkeys.hint')}>
+      <dl className="grid grid-cols-[minmax(0,1fr)_auto] gap-x-4 text-[13px]" data-testid="shortcuts">
+        {SHORTCUT_ACTIONS.map((action) => (
+          <div key={action} className="col-span-2 grid grid-cols-subgrid items-center border-b border-border py-2 last:border-0" data-testid="shortcut" data-action={action}>
+            <dt className="font-semibold">{t(`hotkeys.actions.${action}`)}</dt>
+            <dd className="flex flex-wrap justify-end gap-x-2 gap-y-1">
+              {hotkeysFor(action).map((h) => (
+                <span key={h.key} className="flex gap-1">
+                  {hotkeyCaps(h).map((c) => <kbd key={c} className="rounded-md border border-border bg-background px-1.5 py-0.5 font-mono text-[11px] text-muted-foreground">{t(`hotkeys.keys.${c}`, { defaultValue: c.toUpperCase() })}</kbd>)}
+                </span>
+              ))}
+            </dd>
+          </div>
+        ))}
+      </dl>
+    </Card>
+  );
 }
 
 function Card({ title, hint, action, children }: { title: string; hint?: string; action?: React.ReactNode; children: React.ReactNode }) {

@@ -1,11 +1,13 @@
 import { QueryClient, useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
-import { useEffect } from 'react';
+import { useCallback, useEffect } from 'react';
+import { useTranslation } from 'react-i18next';
 import { toast } from 'sonner';
 import i18n from '@/i18n';
 import { getBackend } from '@/lib/backend';
+import { sortFolderTree } from '@/lib/folderOrder';
 import { forgetAllFileThumbs } from '@/lib/thumbs/files';
 import { kickThumbQueue, useThumbs } from '@/lib/thumbs/queue';
-import type { AiSettings, BatchUpdate, ImportRequest, ListQuery, McpSettings, Project, ProjectSummary, ThumbLocation, UpdateMetadata, PromoteItem, NetworkSettings } from '@/lib/types';
+import type { AiSettings, BatchUpdate, FolderNode, ImportRequest, ListQuery, McpSettings, Project, ProjectSummary, ThumbLocation, UpdateMetadata, PromoteItem, NetworkSettings } from '@/lib/types';
 
 export const queryClient = new QueryClient({ defaultOptions: { queries: { staleTime: 10_000, retry: false, refetchOnWindowFocus: false } } });
 
@@ -43,7 +45,12 @@ export const useEmbeddedPictures = (p: Project | null | undefined) => useQuery({
 export const useTagCounts = (rootId: string | null = null) => useQuery({ queryKey: keys.tags(rootId), queryFn: async () => (await getBackend()).tagCounts(rootId) });
 export const useFacets = (rootId: string | null = null) => useQuery({ queryKey: keys.facets(rootId), queryFn: async () => (await getBackend()).facets(rootId) });
 export const useThumbLocation = () => useQuery({ queryKey: keys.thumbLocation, queryFn: async () => (await getBackend()).getThumbLocation() });
-export const useFolderTree = (rootId: string) => useQuery({ queryKey: keys.tree(rootId), queryFn: async () => (await getBackend()).folderTree(rootId) });
+/** The folder tree in display order (see `sortFolderTree`); it follows the UI language. */
+export function useFolderTree(rootId: string) {
+  const lang = useTranslation().i18n.language;
+  const select = useCallback((tree: FolderNode[]) => sortFolderTree(tree, lang), [lang]);
+  return useQuery({ queryKey: keys.tree(rootId), queryFn: async () => (await getBackend()).folderTree(rootId), select });
+}
 export const useLibraryStats = () => useQuery({ queryKey: keys.stats, queryFn: async () => (await getBackend()).libraryStats() });
 export const useIgnorePatterns = () => useQuery({ queryKey: keys.ignore, queryFn: async () => (await getBackend()).getIgnorePatterns() });
 export const useContainerDirs = () => useQuery({ queryKey: keys.containers, queryFn: async () => (await getBackend()).getContainerDirs() });
@@ -211,12 +218,23 @@ export const useDeleteSmartCollection = () => useCollectionMutation((b, id: stri
 export const useProjectHints = (id: string | null, enabled = true) => useQuery({ queryKey: ['hints', id ?? ''], queryFn: async () => (await getBackend()).projectHints(id!), enabled: !!id && enabled, staleTime: 60_000 });
 export const useCreatorSuggestions = (enabled: boolean) => useQuery({ queryKey: ['creatorSuggestions'], queryFn: async () => (await getBackend()).creatorSuggestions(), enabled, staleTime: 30_000 });
 
+type MoveArgs = { projectIds: string[]; rootId: string; destRel: string };
+const afterMove = (qc: QueryClient, report: { moved: { id: string }[] }, a: MoveArgs) => { const kept = new Set(report.moved.map((p) => p.id)); for (const id of a.projectIds) if (!kept.has(id)) qc.removeQueries({ queryKey: keys.project(id) }); invalidateLibrary(qc); };
 export function useMoveProjects() {
   const qc = useQueryClient();
   return useMutation({
-    mutationFn: async (a: { projectIds: string[]; rootId: string; destRel: string }) => (await getBackend()).moveProjects(a.projectIds, a.rootId, a.destRel),
-    onSuccess: (report, a) => { const kept = new Set(report.moved.map((p) => p.id)); for (const id of a.projectIds) if (!kept.has(id)) qc.removeQueries({ queryKey: keys.project(id) }); invalidateLibrary(qc); },
+    mutationFn: async (a: MoveArgs) => (await getBackend()).moveProjects(a.projectIds, a.rootId, a.destRel),
+    onSuccess: (report, a) => afterMove(qc, report, a),
   });
+}
+/**
+ * The same move outside a component's lifetime: the Undo of a toast outlives what offered it
+ * (the details page reads the project again under its new id and drops its dialogs meanwhile).
+ */
+export async function moveProjectsDetached(qc: QueryClient, a: MoveArgs) {
+  const report = await (await getBackend()).moveProjects(a.projectIds, a.rootId, a.destRel);
+  afterMove(qc, report, a);
+  return report;
 }
 
 export function usePromoteInboxEach() {

@@ -62,6 +62,7 @@
     "files_other": "{{count}} files",
     "selected_one": "{{count}} selected",
     "selected_other": "{{count}} selected",
+    "selectProject": "Select {{title}}",
     "columns": {
       "title": "Title",
       "creator": "Creator",
@@ -476,6 +477,7 @@
     "removeN_other": "Remove {{count}} from favorites"
   },
   "actions": {
+    "more": "More actions",
     "rename": "Rename",
     "renameTitle": "Rename project folder",
     "renameBody": "The folder on disk is renamed. Tags and metadata in project.yaml are kept.",
@@ -784,6 +786,26 @@
       "offline": "Library folder is offline",
       "nothing_new": "Nothing new on the page",
       "cancelled": "Cancelled before its turn"
+    }
+  },
+  "hotkeys": {
+    "title": "Keyboard shortcuts",
+    "hint": "They work in the library while no dialog or menu is open and the cursor is not in a text field.",
+    "actions": {
+      "selectAll": "Select all projects in view",
+      "open": "Open the selected project",
+      "rename": "Rename the selected project",
+      "delete": "Move the selection to the trash (asks first)",
+      "clearSelection": "Clear the selection",
+      "focusSearch": "Search the library"
+    },
+    "keys": {
+      "ctrl": "Ctrl",
+      "cmd": "⌘",
+      "enter": "Enter",
+      "delete": "Del",
+      "backspace": "⌫",
+      "escape": "Esc"
     }
   }
 }

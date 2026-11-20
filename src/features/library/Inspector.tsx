@@ -1,4 +1,4 @@
-import { Archive, Check, CloudOff, ExternalLink, Eye, FileBox, FolderHeart, FolderInput, FolderOpen, Globe, ImageUp, Layers, Pencil, Plus, Scale, Sparkles, Star, StarOff, Trash2, X } from 'lucide-react';
+import { Archive, Check, CloudOff, ExternalLink, FileBox, FolderHeart, FolderInput, Globe, Layers, Plus, Scale, Star, StarOff, Trash2, X } from 'lucide-react';
 import { DropdownMenu, DropdownMenuContent, DropdownMenuItem, DropdownMenuSeparator, DropdownMenuTrigger } from '@/components/ui/dropdown-menu';
 import { useState } from 'react';
 import { useTranslation } from 'react-i18next';
@@ -7,9 +7,8 @@ import { Badge } from '@/components/ui/badge';
 import { Button } from '@/components/ui/button';
 import { Input } from '@/components/ui/input';
 import { ScrollArea } from '@/components/ui/scroll-area';
-import type { ProjectActions } from '@/features/library/ProjectMenu';
-import { SuggestDialog } from '@/features/library/SuggestDialog';
-import { useSourceUpdate } from '@/features/library/SourceUpdateDialog';
+import { ProjectActionBar } from '@/features/library/ProjectActionBar';
+import { toSummary, type ProjectActions } from '@/features/library/projectActions';
 import { TagEditor } from '@/features/library/TagEditor';
 import { HintChips } from '@/features/library/HintChips';
 import { Thumb } from '@/features/library/Thumb';
@@ -38,8 +37,6 @@ export function Inspector({ selectedIds, visible, tagCounts, facets, filterTitle
   const roots = useRoots();
   const update = useUpdateMetadata();
   const ui = useUi();
-  const [suggesting, setSuggesting] = useState(false);
-  const [fetchingPage, setFetchingPage] = useState(false);
 
   if (selectedIds.length === 0 || (selectedIds.length === 1 && !project.data)) {
     return (
@@ -88,7 +85,7 @@ export function Inspector({ selectedIds, visible, tagCounts, facets, filterTitle
               ? <Button size="sm" variant="outline" onClick={() => actions.setFavoriteMany(sel, false)} data-testid="multi-unfavorite"><StarOff />{t('inspector.unfavoriteAll')}</Button>
               : <Button size="sm" variant="outline" onClick={() => actions.setFavoriteMany(sel, true)} data-testid="multi-favorite"><Star />{t('inspector.favoriteAll')}</Button>}
             <Button size="sm" variant="outline" onClick={() => actions.move(sel)} data-testid="multi-move"><FolderInput />{t('actions.move')}</Button>
-            <Button size="sm" variant="outline" onClick={() => useSourceUpdate.getState().open(sel)} data-testid="multi-source-update"><Globe />{t('sourceUpdate.action')}</Button>
+            <Button size="sm" variant="outline" onClick={() => actions.updateFromSource(sel)} data-testid="multi-source-update"><Globe />{t('sourceUpdate.action')}</Button>
             <Button size="sm" variant="destructive" onClick={() => actions.removeMany(sel)} data-testid="multi-delete"><Trash2 />{t('inspector.deleteSelected')}</Button>
           </div>
           <Section title={t('library.selected', { count: sel.length })}>
@@ -103,7 +100,7 @@ export function Inspector({ selectedIds, visible, tagCounts, facets, filterTitle
   const root = roots.data?.find((r) => r.id === p.root_id);
   const dirPath = root ? `${root.path}${p.rel_path ? (root.path.includes('\\') ? '\\' : '/') + p.rel_path.replace(/\//g, root.path.includes('\\') ? '\\' : '/') : ''}` : p.rel_path;
   const sidecarBadge = p.sidecar.state === 'ok' ? <Badge variant="success" className="max-w-full" title={t('inspector.sidecarOk')}><span className="truncate">{t('inspector.sidecarOk')}</span></Badge> : p.sidecar.state === 'malformed' ? <Badge variant="warning" className="max-w-full" title={p.sidecar.message}><span className="truncate">{t('inspector.sidecarMalformed')}</span></Badge> : <Badge variant="outline" className="max-w-full" title={t('inspector.sidecarMissing')}><span className="truncate">{t('inspector.sidecarMissing')}</span></Badge>;
-  const summary: ProjectSummary = { id: p.id, root_id: p.root_id, rel_path: p.rel_path, title: p.title, creator: p.creator, tags: p.tags, thumbnail: p.thumbnail, file_count: p.files.length, model_count: p.model_count, total_bytes: p.total_bytes, modified: p.modified, has_sidecar: p.sidecar.state === 'ok', offline: p.offline, favorite: p.favorite, added: p.added, thumb: p.thumb, slicer: p.slicer, packed: p.packed };
+  const summary = toSummary(p);
 
   const saveTags = (tags: string[]) => {
     update.mutate({ id: p.id, update: { tags, expected_stamp: p.sidecar_stamp ?? null } }, {
@@ -124,19 +121,11 @@ export function Inspector({ selectedIds, visible, tagCounts, facets, filterTitle
         </Thumb>
         <div className="flex items-start gap-2">
           <h2 className="min-w-0 flex-1 text-xl font-extrabold tracking-tight text-balance" data-testid="inspector-title">{p.title}</h2>
-          <Button size="icon-sm" variant="ghost" aria-pressed={p.favorite} aria-label={p.favorite ? t('favorites.remove') : t('favorites.add')} title={p.favorite ? t('favorites.remove') : t('favorites.add')} data-testid="inspector-favorite" onClick={() => actions.toggleFavorite(summary)} className={cn(p.favorite && 'text-warning')}><Star className={cn(p.favorite && 'fill-current')} /></Button>
+          <Button size="icon-sm" variant="ghost" aria-pressed={p.favorite} aria-label={p.favorite ? t('favorites.remove') : t('favorites.add')} title={p.favorite ? t('favorites.remove') : t('favorites.add')} data-testid="inspector-favorite" data-action="favorite" onClick={() => actions.toggleFavorite(summary)} className={cn(p.favorite && 'text-warning')}><Star className={cn(p.favorite && 'fill-current')} /></Button>
         </div>
         <div className="mb-3 break-all text-xs font-semibold text-muted-foreground">{dirPath}</div>
-        <div className="mb-3 flex flex-wrap gap-2">
-          <Button size="sm" onClick={() => navigate({ page: 'project', id: p.id })} data-testid="inspector-open"><Eye />{t('inspector.open')}</Button>
-          <Button size="sm" variant="outline" disabled={p.offline} onClick={() => actions.reveal(summary)} title={t('inspector.reveal')}><FolderOpen />{t('inspector.reveal')}</Button>
-          <Button size="icon-sm" variant="outline" disabled={p.offline || p.rel_path === ''} onClick={() => actions.rename(summary)} title={t('actions.rename')} aria-label={t('actions.rename')} data-testid="inspector-rename"><Pencil /></Button>
-          <Button size="icon-sm" variant="outline" disabled={p.offline || p.rel_path === ''} onClick={() => actions.move([summary])} title={t('actions.move')} aria-label={t('actions.move')} data-testid="inspector-move"><FolderInput /></Button>
-          <Button size="icon-sm" variant="outline" disabled={p.offline} onClick={() => actions.rerenderThumbnail(summary)} title={t('actions.rerenderThumb')} aria-label={t('actions.rerenderThumb')} data-testid="inspector-rethumb"><ImageUp /></Button>
-          <Button size="icon-sm" variant="outline" disabled={p.offline} onClick={() => setSuggesting(true)} title={t('inspector.suggest')} aria-label={t('inspector.suggest')} data-testid="inspector-suggest"><Sparkles /></Button>
-          <Button size="icon-sm" variant="outline" disabled={p.offline} onClick={() => setFetchingPage(true)} title={t('inspector.page.suggest')} aria-label={t('inspector.page.suggest')} data-testid="inspector-fetch-page"><Globe /></Button>
-          <Button size="icon-sm" variant="outline" disabled={p.offline || p.rel_path === ''} onClick={() => actions.remove(summary)} title={t('actions.delete')} aria-label={t('actions.delete')} data-testid="inspector-delete" className="text-destructive hover:text-destructive"><Trash2 /></Button>
-        </div>
+        {/* the same list as the context menu (#70): the usual ones as buttons, the rest under "more" */}
+        <ProjectActionBar project={summary} actions={actions} prefix="inspector" size="sm" className="mb-3" exclude={['favorite']} primary="open" labeled={['open', 'reveal']} inline={['open', 'reveal', 'rename', 'move', 'rerenderThumbnail', 'suggest', 'fetchPage', 'delete']} />
         {p.offline && root && <p className="mb-3 rounded-[10px] bg-warning-soft p-3 text-xs font-semibold text-warning">{t('inspector.offlineHint', { path: root.path })}</p>}
         <dl className="grid grid-cols-[92px_minmax(0,1fr)] gap-x-3 gap-y-2 text-[13px]">
           <dt className="text-muted-foreground">{t('inspector.creator')}</dt><dd className="truncate font-semibold">{p.creator ?? <span className="text-muted-foreground">{t('library.unknownCreator')}</span>}</dd>
@@ -166,8 +155,6 @@ export function Inspector({ selectedIds, visible, tagCounts, facets, filterTitle
         {p.warnings.length > 0 && <Section title={t('inspector.warnings')}><ul className="list-disc pl-4 text-xs text-warning">{p.warnings.map((w) => <li key={w}>{w}</li>)}</ul></Section>}
         {p.description && <Section title={t('project.description')}><p className="text-[13px] text-secondary-foreground">{p.description}</p></Section>}
       </div>
-      <SuggestDialog project={p} open={suggesting} onOpenChange={setSuggesting} />
-      <SuggestDialog project={p} open={fetchingPage} onOpenChange={setFetchingPage} mode="page" />
     </ScrollArea>
   );
 }

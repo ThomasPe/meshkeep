@@ -2,7 +2,9 @@ import { useCallback } from 'react';
 import { useTranslation } from 'react-i18next';
 import { toast } from 'sonner';
 import { reportError } from '@/lib/errors';
-import { useMoveProjects } from '@/lib/queries';
+import { useQueryClient } from '@tanstack/react-query';
+import { moveProjectsDetached, useMoveProjects } from '@/lib/queries';
+import { followProject } from '@/lib/router';
 
 /** `root:rel/path` -> the folder the project sat in, for undo. */
 export function parentOf(id: string): { rootId: string; rel: string } {
@@ -19,6 +21,7 @@ export function parentOf(id: string): { rootId: string; rel: string } {
 export function useMove() {
   const { t } = useTranslation();
   const move = useMoveProjects();
+  const qc = useQueryClient();
   const run = useCallback((projectIds: string[], rootId: string, destRel: string, destLabel: string, onDone?: () => void) => {
     move.mutate({ projectIds, rootId, destRel }, {
       onSuccess: (report) => {
@@ -30,6 +33,8 @@ export function useMove() {
           if (failed.has(oldId)) continue;
           const np = report.moved[k++];
           if (!np || np.id === oldId) continue;
+          // an open details page goes along with its project (#70)
+          followProject(oldId, np.id);
           const o = parentOf(oldId);
           const key = `${o.rootId}:${o.rel}`;
           origins.set(key, [...(origins.get(key) ?? []), np.id]);
@@ -39,7 +44,10 @@ export function useMove() {
           const undo = () => {
             for (const [key, ids] of origins) {
               const i = key.indexOf(':');
-              move.mutate({ projectIds: ids, rootId: key.slice(0, i), destRel: key.slice(i + 1) }, { onSuccess: () => toast.success(t('actions.movedBack', { count: ids.length })), onError: reportError });
+              moveProjectsDetached(qc, { projectIds: ids, rootId: key.slice(0, i), destRel: key.slice(i + 1) }).then((back) => {
+                if (back.failed.length === 0) ids.forEach((id, j) => { const np = back.moved[j]; if (np) followProject(id, np.id); });
+                toast.success(t('actions.movedBack', { count: ids.length }));
+              }).catch(reportError);
             }
           };
           toast.success(t('actions.moved', { count, dest: destLabel }), { action: { label: t('actions.undo'), onClick: undo }, duration: 8000 });
@@ -49,6 +57,6 @@ export function useMove() {
       },
       onError: reportError,
     });
-  }, [move, t]);
+  }, [move, qc, t]);
   return { run, pending: move.isPending };
 }

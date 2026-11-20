@@ -9,6 +9,7 @@ interface Props {
   tile: number;
   selected: Set<string>;
   onSelect: (id: string, e: React.MouseEvent) => void;
+  onToggle: (id: string) => void;
   onOpen: (id: string) => void;
   onTag: (tag: string) => void;
   actions: ProjectActions;
@@ -23,7 +24,7 @@ const META_HEIGHT = 112;
 /** Drag payload of project ids, read by the folder tree. */
 export const PROJECTS_MIME = 'application/x-meshkeep-projects';
 
-export function ProjectGrid({ projects, tile, selected, onSelect, onOpen, onTag, actions, onReorder }: Props) {
+export function ProjectGrid({ projects, tile, selected, onSelect, onToggle, onOpen, onTag, actions, onReorder }: Props) {
   const parentRef = useRef<HTMLDivElement>(null);
   const [dragId, setDragId] = useState<string | null>(null);
   const [overId, setOverId] = useState<string | null>(null);
@@ -75,7 +76,7 @@ export function ProjectGrid({ projects, tile, selected, onSelect, onOpen, onTag,
                 onDragLeave={() => { if (overId === p.id) setOverId(null); }}
                 onDrop={(e) => { if (!onReorder) return; e.preventDefault(); drop(p.id); }}
                 onDragEnd={() => { setDragId(null); setOverId(null); }}>
-                <ProjectCard project={p} selected={selected.has(p.id)} selection={selection} onSelect={(e) => onSelect(p.id, e)} onOpen={() => onOpen(p.id)} onTag={onTag} actions={actions} />
+                <ProjectCard project={p} selected={selected.has(p.id)} selection={selection} onSelect={(e) => onSelect(p.id, e)} onToggle={() => onToggle(p.id)} onOpen={() => onOpen(p.id)} onTag={onTag} actions={actions} />
               </div>
             ))}
           </div>

@@ -1275,6 +1275,19 @@ test('folder tree: containers get a folder icon and a count, projects a model ic
   expect(await icon(desk)).not.toBe(await icon(stand));
 });
 
+test('folder tree: rows are ordered alphabetically regardless of case (#74)', async ({ page }) => {
+  // the backend lists names in byte order, where every lowercase name comes after "Z"
+  await page.getByTestId('project-card').filter({ hasText: 'Phone Stand' }).click({ button: 'right' });
+  await page.getByTestId('menu-rename').click();
+  await page.getByTestId('rename-input').fill('bracket 10');
+  await page.getByTestId('rename-confirm').click();
+  await expect(page.getByTestId('rename-dialog')).toBeHidden();
+  await page.locator('[data-tree-row][data-label="Desk"]').getByRole('button', { name: 'expand' }).click();
+  const rows = page.locator('[data-tree-row][data-parent="r1:Projects/Desk"]');
+  await expect(rows).toHaveCount(2);
+  expect(await rows.evaluateAll((els) => els.map((el) => el.getAttribute('data-label')))).toEqual(['bracket 10', 'Cable Clips']);
+});
+
 test('folder tree: a project row opens the project, expansion is remembered', async ({ page }) => {
   const desk = page.locator('[data-tree-row][data-label="Desk"]');
   await desk.getByRole('button', { name: 'expand' }).click();
@@ -1329,6 +1342,54 @@ test('move: the dialog moves a project into a folder or a new sub-folder, undo b
   await expect(page.getByText('2 projects moved to 3D Models / Archive')).toBeVisible();
   await expect(page.locator('[data-tree-row][data-label="Archive"]')).toHaveAttribute('data-kind', 'folder');
   await expect(page.locator('[data-tree-row][data-label="Archive"]')).toContainText('2');
+});
+
+test('check mark on a card adds it to the selection or takes it out, the rest stays (#72)', async ({ page }) => {
+  const cards = page.getByTestId('project-card');
+  const selected = page.locator('[data-testid="project-card"][aria-selected="true"]');
+  const a = cards.filter({ hasText: 'Decorative Vase' });
+  const b = cards.filter({ hasText: 'Dice Tower' });
+  await a.click();
+  await expect(selected).toHaveCount(1);
+  // the check mark of another card adds it, without Ctrl and without opening anything
+  await b.hover();
+  const checkB = b.getByRole('checkbox', { name: 'Select Dice Tower' });
+  await checkB.click();
+  await expect(selected).toHaveCount(2);
+  await expect(a).toHaveAttribute('aria-selected', 'true');
+  await expect(b).toHaveAttribute('aria-selected', 'true');
+  await expect(checkB).toHaveAttribute('aria-checked', 'true');
+  await expect(page.getByTestId('status-selected')).toHaveText('2 selected');
+  // the check mark of a selected card takes only that one out
+  await a.getByTestId('card-select').click();
+  await expect(selected).toHaveCount(1);
+  await expect(b).toHaveAttribute('aria-selected', 'true');
+  await expect(a.getByTestId('card-select')).toHaveAttribute('aria-checked', 'false');
+  // keyboard: Space and Enter toggle once each and neither opens the project
+  await a.getByTestId('card-select').focus();
+  await page.keyboard.press('Space');
+  await expect(selected).toHaveCount(2);
+  await page.keyboard.press('Enter');
+  await expect(selected).toHaveCount(1);
+  await expect(page.getByTestId('library')).toBeVisible();
+  // a double-click on it does not open the project either
+  await a.getByTestId('card-select').dblclick();
+  await expect(page.getByTestId('library')).toBeVisible();
+  await expect(selected).toHaveCount(1);
+  // a plain click on a card still replaces the selection
+  await a.getByTestId('card-select').click();
+  await expect(selected).toHaveCount(2);
+  await cards.filter({ hasText: 'Cable Clips' }).click();
+  await expect(selected).toHaveCount(1);
+  await expect(selected).toContainText('Cable Clips');
+  // the toggled card is the anchor of a following Shift-click range
+  const first = cards.nth(0), third = cards.nth(2);
+  await first.click();
+  await first.getByTestId('card-select').click();
+  await expect(selected).toHaveCount(0);
+  await first.getByTestId('card-select').click();
+  await third.click({ modifiers: ['Shift'] });
+  await expect(selected).toHaveCount(3);
 });
 
 test('context menu: acts on the selection when the clicked card is part of it, else selects that card', async ({ page }) => {
@@ -1532,4 +1593,120 @@ test('folder tree: arrow keys navigate and select like Explorer', async ({ page 
   // the tree is one tab stop: Tab leaves it instead of walking every row
   await page.keyboard.press('Tab');
   expect(await page.evaluate(() => document.activeElement?.closest('[data-tree-row]') !== null)).toBe(false);
+});
+
+test('hotkeys: Ctrl+A selects every project in view, also the ones not rendered yet', async ({ page }) => {
+  const main = page.getByTestId('library-main');
+  await expect(page.getByTestId('project-card').first()).toBeVisible();
+  const total = Number(await page.getByTestId('result-count').textContent());
+  // the grid is virtualized: fewer cards are in the page than projects in view
+  expect(await page.getByTestId('project-card').count()).toBeLessThan(total);
+  await page.keyboard.press('Control+a');
+  await expect(main).toHaveAttribute('data-selected-count', String(total));
+  await expect(page.getByTestId('multi-actions')).toBeVisible();
+  // the last project, far below the first screen, is selected too
+  await page.getByTestId('project-grid').evaluate((el) => el.scrollTo(0, el.scrollHeight));
+  await expect(page.getByTestId('project-card').last()).toHaveAttribute('aria-selected', 'true');
+  // Escape clears the selection again
+  await page.keyboard.press('Escape');
+  await expect(main).toHaveAttribute('data-selected-count', '0');
+  // after a search only what is left in view, in the list view as well
+  await page.getByTestId('search').fill('gridfinity');
+  await expect(page.getByTestId('result-count')).not.toHaveText(String(total));
+  const found = Number(await page.getByTestId('result-count').textContent());
+  expect(found).toBeGreaterThan(1);
+  await page.getByTestId('view-list').click();
+  await page.keyboard.press('Control+a');
+  await expect(main).toHaveAttribute('data-selected-count', String(found));
+  await expect(page.locator('[data-testid="project-row"][aria-selected="true"]')).toHaveCount(found);
+  // and inside a folder
+  await page.getByRole('button', { name: 'clear search' }).click();
+  await page.getByTestId('filter-folder').filter({ hasText: 'Desk' }).first().click();
+  await expect(page.getByTestId('result-count')).toHaveText('2');
+  await expect(main).toHaveAttribute('data-selected-count', '0');
+  await page.keyboard.press('Control+a');
+  await expect(main).toHaveAttribute('data-selected-count', '2');
+});
+
+test('hotkeys: Ctrl+A in the search field selects its text, not the projects', async ({ page }) => {
+  const main = page.getByTestId('library-main');
+  const search = page.getByTestId('search');
+  await search.fill('gridfinity');
+  await expect(page.getByTestId('result-count')).not.toHaveText('0');
+  await search.press('Control+a');
+  await expect(main).toHaveAttribute('data-selected-count', '0');
+  expect(await search.evaluate((el: HTMLInputElement) => el.value.slice(el.selectionStart ?? 0, el.selectionEnd ?? 0))).toBe('gridfinity');
+  // typing replaces the selected text, and the other shortcuts stay out of the field as well
+  await page.keyboard.type('robo');
+  await expect(search).toHaveValue('robo');
+  await page.keyboard.press('Delete');
+  await page.keyboard.press('F2');
+  await page.keyboard.press('Enter');
+  await expect(page.getByRole('dialog')).toHaveCount(0);
+  await expect(page.getByTestId('library')).toBeVisible();
+});
+
+test('hotkeys: Ctrl+F and Ctrl+K focus the search field', async ({ page }) => {
+  const search = page.getByTestId('search');
+  await page.getByTestId('project-card').first().click();
+  await page.keyboard.press('Control+f');
+  await expect(search).toBeFocused();
+  await page.keyboard.press('Escape');
+  await expect(search).not.toBeFocused();
+  await page.keyboard.press('Control+k');
+  await expect(search).toBeFocused();
+  // not from behind a dialog
+  await page.keyboard.press('Escape');
+  await page.getByTestId('project-card').first().click();
+  await page.keyboard.press('F2');
+  await expect(page.getByTestId('rename-dialog')).toBeVisible();
+  await page.getByTestId('rename-dialog').getByRole('button', { name: 'Cancel' }).focus();
+  await page.keyboard.press('Control+f');
+  await expect(search).not.toBeFocused();
+  await expect(page.getByTestId('rename-dialog')).toBeVisible();
+});
+
+test('hotkeys: Delete asks before it trashes the selection, Enter opens the selected project', async ({ page }) => {
+  const main = page.getByTestId('library-main');
+  await page.getByTestId('project-card').filter({ hasText: 'Decorative Vase' }).click();
+  await page.getByTestId('project-card').filter({ hasText: 'Dice Tower' }).click({ modifiers: ['Control'] });
+  const total = Number(await page.getByTestId('result-count').textContent());
+  await page.keyboard.press('Delete');
+  await expect(page.getByTestId('delete-many-confirm')).toBeVisible();
+  // while the dialog is open the keys are its own: nothing gets selected, Escape only closes it
+  await page.keyboard.press('Control+a');
+  await expect(main).toHaveAttribute('data-selected-count', '2');
+  await page.keyboard.press('Escape');
+  await expect(page.getByTestId('delete-many-confirm')).toBeHidden();
+  await expect(main).toHaveAttribute('data-selected-count', '2');
+  await expect(page.getByTestId('result-count')).toHaveText(String(total));
+  await page.keyboard.press('Delete');
+  await page.getByTestId('delete-many-confirm').click();
+  await expect(page.getByTestId('result-count')).toHaveText(String(total - 2));
+  // Enter: one project in view, selected with Ctrl+A while no card has the focus
+  await page.getByTestId('search').fill('robo');
+  await expect(page.getByTestId('result-count')).toHaveText('1');
+  await page.getByTestId('search').blur();
+  await page.keyboard.press('Control+a');
+  await expect(main).toHaveAttribute('data-selected-count', '1');
+  await page.keyboard.press('Enter');
+  await expect(page).toHaveURL(/#\/project\//);
+  await expect(page.getByText('Robotic Arm v4').first()).toBeVisible();
+});
+
+test('hotkeys: the folder tree keeps its own keys, settings list the shortcuts', async ({ page }) => {
+  const main = page.getByTestId('library-main');
+  await page.getByTestId('project-card').filter({ hasText: 'Dice Tower' }).click();
+  await page.locator('[data-tree-row]').first().focus();
+  // Delete, F2 and Escape with the focus in the tree do nothing to the selected project
+  await page.keyboard.press('Delete');
+  await page.keyboard.press('F2');
+  await expect(page.getByRole('dialog')).toHaveCount(0);
+  await page.keyboard.press('Escape');
+  await expect(main).toHaveAttribute('data-selected-count', '1');
+  await page.getByTestId('nav-settings').click();
+  await expect(page.getByTestId('shortcut')).toHaveCount(6);
+  await expect(page.locator('[data-testid="shortcut"][data-action="selectAll"]')).toContainText('Select all projects in view');
+  await expect(page.locator('[data-testid="shortcut"][data-action="selectAll"] kbd')).toHaveText(['Ctrl', 'A']);
+  await expect(page.locator('[data-testid="shortcut"][data-action="focusSearch"] kbd')).toHaveText(['Ctrl', 'F', 'Ctrl', 'K']);
 });
