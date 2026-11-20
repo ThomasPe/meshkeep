@@ -952,7 +952,7 @@ mod tests {
         w.finish().unwrap();
     }
     fn remover() -> Deleter {
-        Box::new(|p: &Path| {
+        std::sync::Arc::new(|p: &Path| {
             if p.is_dir() {
                 std::fs::remove_dir_all(p)
             } else {
@@ -1168,7 +1168,7 @@ mod tests {
         // When the trash refuses the archive, the finished project stays and the report
         // carries a warning instead of counting the item as failed.
         write_zip(&src.join("Stuck.zip"), &[("Stuck/part.stl", b"solid")]);
-        let failing: Deleter = Box::new(|_: &Path| Err(std::io::Error::other("recycle bin unavailable")));
+        let failing: Deleter = std::sync::Arc::new(|_: &Path| Err(std::io::Error::other("recycle bin unavailable")));
         let req = ImportRequest {
             root_id: "r".into(),
             archive_policy: ArchivePolicy::Trash,
