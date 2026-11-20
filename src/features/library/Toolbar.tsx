@@ -5,10 +5,12 @@ import { Truncated } from '@/components/ui/truncated';
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from '@/components/ui/select';
 import { Slider } from '@/components/ui/slider';
 import { ToggleGroup, ToggleGroupItem } from '@/components/ui/toggle-group';
+import { Breadcrumbs } from '@/features/library/Breadcrumbs';
+import type { Crumb } from '@/lib/crumbs';
 import { useUi } from '@/lib/store';
 import type { SortKey } from '@/lib/types';
 
-export function Toolbar({ title, count, onRescan, scanning, sortLocked, onImport, onSaveSmart, collectionSort }: { title: string; count: number; onRescan?: () => void; scanning?: boolean; sortLocked?: boolean; onImport?: () => void; onSaveSmart?: () => void; collectionSort?: boolean }) {
+export function Toolbar({ title, crumbs, count, onRescan, scanning, sortLocked, onImport, onSaveSmart, collectionSort }: { title: string; crumbs?: Crumb[]; count: number; onRescan?: () => void; scanning?: boolean; sortLocked?: boolean; onImport?: () => void; onSaveSmart?: () => void; collectionSort?: boolean }) {
   const { t } = useTranslation();
   const { tags, removeTag, text, setText, creator, setCreator, license, setLicense, material, setMaterial, fileType, setFileType, sort, setSort, view, setView, tile, setTile } = useUi();
   const chips: Array<{ key: string; value: string | null; icon: React.ReactNode; clear: () => void; label: string; upper?: boolean }> = [
@@ -19,7 +21,10 @@ export function Toolbar({ title, count, onRescan, scanning, sortLocked, onImport
   ];
   return (
     <div className="flex flex-wrap items-center gap-2 px-5 pb-2 pt-3.5" data-testid="toolbar">
-      <Truncated as="h1" text={title} className="mr-1 max-w-[40ch] text-lg font-extrabold tracking-tight" />
+      {/* inside a folder the title is the last step of a trail whose earlier steps lead back up (#73) */}
+      {crumbs?.length
+        ? <Breadcrumbs crumbs={crumbs} className="gap-x-2 gap-y-0 text-sm" current={<Truncated as="h1" text={title} className="mr-1 max-w-[40ch] text-lg font-extrabold tracking-tight text-foreground" />} />
+        : <Truncated as="h1" text={title} className="mr-1 max-w-[40ch] text-lg font-extrabold tracking-tight" />}
       <span className="text-sm font-semibold text-muted-foreground tabular" data-testid="result-count">{count}</span>
       {tags.map((tag) => (
         <span key={tag} className="inline-flex h-8 items-center gap-1.5 rounded-full bg-accent px-3 text-[13px] font-bold text-accent-foreground" data-testid="tag-chip">
