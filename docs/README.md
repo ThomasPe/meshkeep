@@ -7,7 +7,6 @@
 | `open-questions.md` | Unresolved points, referenced from the spec as **[Q#]**. |
 | `decisions/` | Architecture decision records: tech stack, UI framework, AI assistance, MCP server. |
 | `store/` | Microsoft Store release pipeline and listing texts. |
-| `mockups/` | Reference image and interactive HTML-only UI mockups used to compare visual directions. |
 
 ## Spec
 
