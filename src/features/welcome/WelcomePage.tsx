@@ -1,8 +1,9 @@
-import { Boxes, ChevronRight, FileText, FolderOpen, Images, Settings, Upload } from 'lucide-react';
+import { ChevronRight, FileText, FolderOpen, Images, Settings, Upload } from 'lucide-react';
 import { useImport } from '@/features/import/useImport';
 import { useTranslation } from 'react-i18next';
 import { useLibraryActions } from '@/features/library/useLibraryActions';
 import { routeHref } from '@/lib/router';
+import keepDetail from '@/assets/brand/keep-detail.svg';
 
 export function WelcomePage({ onScanEnd }: { onScanEnd: (rootId: string) => void }) {
   const { t } = useTranslation();
@@ -11,7 +12,7 @@ export function WelcomePage({ onScanEnd }: { onScanEnd: (rootId: string) => void
   return (
     <main className="grid h-full place-items-center overflow-auto p-6" data-testid="welcome">
       <div className="grid w-full max-w-[560px] justify-items-center gap-5 text-center">
-        <div className="grid size-20 place-items-center rounded-[26px] bg-primary text-primary-foreground"><Boxes className="size-10" /></div>
+        <img src={keepDetail} alt="" className="size-20" />
         <h1 className="text-3xl font-extrabold tracking-tight text-balance">{t('welcome.title')}</h1>
         <p className="max-w-[46ch] text-muted-foreground">{t('welcome.lead')}</p>
         <div className="mt-1 grid w-full gap-2.5 text-left">

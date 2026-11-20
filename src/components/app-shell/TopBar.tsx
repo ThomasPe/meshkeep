@@ -1,4 +1,4 @@
-import { Boxes, LayoutGrid, MessageSquarePlus, Moon, Search, Settings, Sun } from 'lucide-react';
+import { LayoutGrid, MessageSquarePlus, Moon, Search, Settings, Sun } from 'lucide-react';
 import { useEffect, useRef, useState } from 'react';
 import { useTranslation } from 'react-i18next';
 import { Button } from '@/components/ui/button';
@@ -8,6 +8,7 @@ import { hotkeyCaps, useHotkeys } from '@/lib/hotkeys';
 import { navigate, routeHref, type Route } from '@/lib/router';
 import { applyTheme, loadTheme, useUi } from '@/lib/store';
 import { cn } from '@/lib/utils';
+import keepSmall from '@/assets/brand/keep-small.svg';
 
 export function TopBar({ route }: { route: Route }) {
   const { t } = useTranslation();
@@ -35,7 +36,7 @@ export function TopBar({ route }: { route: Route }) {
   return (
     <header className="flex items-center gap-2 border-b border-border bg-panel px-4">
       <a href="#/library" className="mr-2 flex items-center gap-2.5 text-base font-extrabold tracking-tight text-foreground">
-        <span className="grid size-7 place-items-center rounded-[9px] bg-primary text-primary-foreground"><Boxes className="size-4" /></span>
+        <img src={keepSmall} alt="" className="size-7" />
         <span>{t('app.name')}</span>
       </a>
       <nav className="flex gap-0.5">

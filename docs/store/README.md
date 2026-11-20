@@ -114,6 +114,31 @@ the way a client does, and expects a JSON-RPC answer. A user can switch aliases 
 Windows Settings → Apps → Advanced app settings → App execution aliases; then the bridge
 is not reachable until it is switched back on.
 
+## Icons
+
+The icon is a castle keep built from flat facets, drawn three times in
+`src/assets/brand/`: `keep-detail.svg` for 48 px and up, `keep-small.svg` for 20 to 47 px
+(taller merlons, wider gate) and `keep-tiny.svg` below that (no gate; it is only a smudge
+at 16 px). `npm run icons` (`scripts/generate-icons.mjs`) renders every raster file from
+them with the Chromium the UI tests use and picks the drawing by the size of the artwork:
+
+- `src-tauri/icons/`: window, installer and bundle icons (PNG, `icon.ico`, `icon.icns`).
+- `msix/Assets/`: tiles in five scales (the unqualified name is the 100 % variant) and
+  `Square44x44Logo.targetsize-*` in fourteen sizes, each also as `_altform-unplated` and
+  `_altform-lightunplated` so the taskbar shows the shape itself instead of a plate in
+  both themes. The folder holds generated files only and is rebuilt on every run.
+- `site/assets/`: website logo, favicon and touch icon.
+
+The generated files are committed; run the script after changing a drawing. The app
+itself imports the SVGs (top bar, welcome page).
+
+`msix/build-msix.ps1` builds `resources.pri` with `makepri` before packing. That index is
+what lets Windows pick `scale-200` or `targetsize-24_altform-unplated` for the logical
+name the manifest uses; without it only the 100 % files are ever shown. The script checks
+that the index lists the qualified variants, and the side-load test that the installed
+package contains it. How the icons look in the taskbar and Start menu at 100 % and 200 %,
+in the light and the dark theme, still needs a look on a real machine.
+
 ## One-time setup
 
 ### Updater signing key (private builds)
@@ -160,8 +185,10 @@ Status: account created and the name **Meshkeep** reserved (2026-10-19); the dom
   the user picks through the system dialog."
 - Screenshots: at least one 1366×768 or larger PNG per listing language; capture the
   library grid with thumbnails, the project page with the 3D viewer, and the import
-  dialog. Store assets (tile logos) are generated into `msix/Assets` from
-  `src-tauri/icons/icon.png`.
+  dialog.
+- Icons: see "Icons" below. The listing's own logos (1:1 at 1080×1080 or 2160×2160,
+  optionally 2:3 at 720×1080) are uploaded in Partner Center and are not part of the
+  package; without them the Store shows the package icon.
 - Listing texts in `docs/store/listing.md`, English and German, with the Store rules they
   have to keep at the top of that file: seven search terms at most and no other products'
   titles among them (policy 10.1.3).

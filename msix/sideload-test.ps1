@@ -10,6 +10,7 @@ $pkg = Get-AppxPackage -Name "DevSym.Meshkeep"
 if (-not $pkg) { throw "package not registered after Add-AppxPackage" }
 Write-Host "Installed $($pkg.PackageFullName) at $($pkg.InstallLocation)"
 if (!(Test-Path (Join-Path $pkg.InstallLocation "meshkeep.exe"))) { throw "exe missing in package" }
+if (!(Test-Path (Join-Path $pkg.InstallLocation "resources.pri"))) { throw "resources.pri missing in package (icons would fall back to the 100 % files)" }
 
 # The stdio MCP bridge has to be reachable through the app execution alias (ADR-0004): that
 # is the command Settings hands to MCP clients in a packaged build. Started the way a client

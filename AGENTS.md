@@ -142,6 +142,7 @@ Browser mode (`npm run dev`, Playwright) uses the mock backend, which synthesize
 | Import staging, inbox, collections UI | `src/features/import/`, `src/features/library/{InboxView,CollectionDialogs}.tsx` |
 | AI assistance | `crates/engine/src/ai.rs`, `src-tauri/src/keys.rs`, `src/features/library/SuggestDialog.tsx`, `AiCard` in `src/features/settings/SettingsPage.tsx` |
 | MSIX packaging, Store docs | `msix/`, `docs/store/` |
+| Icon drawings and generator (`npm run icons`) | `src/assets/brand/`, `scripts/generate-icons.mjs` |
 | Shell commands and events | `src-tauri/src/{commands,state}.rs` |
 | Backend facade (Tauri vs mock) | `src/lib/backend/` |
 | Mesh parsers (STL, OBJ, 3MF) and workers | `src/lib/mesh/`, `src/workers/{mesh,thumb}-worker.ts` |
