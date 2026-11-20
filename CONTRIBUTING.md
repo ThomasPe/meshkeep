@@ -30,5 +30,7 @@ open an issue instead of a pull request.
 ## Practicalities
 
 - Small, focused pull requests against `main`; describe the why in the body.
-- Run `npm run check` before pushing (see `AGENTS.md` for the Windows-only parts).
+- Run the checks from the definition of done in `AGENTS.md` before pushing: at least
+  `npm run typecheck && npm run lint && npm test`, plus `cargo test` when Rust changes
+  (see `AGENTS.md` for the UI tests and the Windows-only parts).
 - New dependencies need one line in the pull request explaining why.

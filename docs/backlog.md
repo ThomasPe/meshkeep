@@ -7,7 +7,7 @@ META-2, …). The application shell is decided: **Tauri 2 with a Rust engine**
 Legend: every item is done only when its acceptance criteria are verified by an
 automated end-to-end check against the real desktop app (see `spec/04-quality.md`).
 
-## Phase 0: Decisions & mockups (current)
+## Phase 0: Decisions & mockups (done)
 
 - [x] Archive the previous implementation (`archive/electron-v1`).
 - [x] Consolidate the specification into `docs/spec/`.
@@ -75,7 +75,8 @@ submission is outside the code: Partner Center identity values, screenshots
       app-data (`tauri-plugin-log` or `tracing` + file appender).
 - [x] **CI.** `.github/workflows/ci.yml`: engine (fmt, clippy, test) and frontend
       (typecheck, Vitest, Playwright UI) on Linux; e2e build + WebDriver E2E + release
-      build on Windows. Installer-on-tag still to do.
+      build on Windows. The installer on a tag comes from `release.yml` (see MSIX
+      packaging below).
 - [x] **Auto-update** (APP-9) via `tauri-plugin-updater` behind the `updater` cargo
       feature (private NSIS builds, manual check in settings); Store and dev builds do not
       compile it. Signing key setup documented in `docs/store/README.md`.
@@ -221,7 +222,8 @@ submission is outside the code: Partner Center identity values, screenshots
       (`file_thumbs` in the index, same cache and location setting as the project
       previews), rendered on demand through the existing worker, one at a time. "Re-render
       preview" covers the files of the project; orphaned PNGs are swept at start.
-- [ ] **Frameless title bar** (APP-10), if confirmed.
+- [x] **Title bar** (APP-10): decided (Q14), the app keeps the native title bar; no
+      frameless window.
 
 ### Epic 9: AI assistance (ADR-0003, first slice)
 All items follow the principles in ADR-0003: opt-in, user-triggered, suggestions only,
