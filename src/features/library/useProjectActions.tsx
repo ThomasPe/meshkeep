@@ -8,6 +8,7 @@ import { Input } from '@/components/ui/input';
 import { Label } from '@/components/ui/label';
 import type { ProjectActions } from '@/features/library/projectActions';
 import { SuggestDialog } from '@/features/library/SuggestDialog';
+import { useSourceUpdate } from '@/features/library/SourceUpdateDialog';
 import { getBackend } from '@/lib/backend';
 import { formatBytes } from '@/lib/format';
 import { reportError } from '@/lib/errors';
@@ -79,6 +80,7 @@ export function useProjectActions(opts: { onRenamed?: (oldId: string, newId: str
       }).catch(reportError);
     },
     suggest: (p, mode) => setSuggesting({ id: p.id, mode }),
+    updateFromSource: (ps) => useSourceUpdate.getState().open(ps),
     addToCollection: (p, cid) => {
       if (cid === null) { openCollectionDialog({ kind: 'create', addProjectIds: [p.id] }); return; }
       addTo.mutate({ id: cid, projectIds: [p.id] }, { onSuccess: (c) => toast.success(t('collections.added', { name: c.name })), onError: reportError });

@@ -309,6 +309,8 @@ export function createMockBackend(): Backend {
       const url = p.source_url && /printables|thingiverse|makerworld|thangs|cults3d|myminifactory/.test(p.source_url) ? p.source_url : p.files.some((x) => x.name.endsWith('.url')) ? 'https://www.printables.com/@Cinderwing3D_1104478/models' : null;
       if (!url) throw err('page_fetch', 'the project has no link to a supported model site');
       await delay(120);
+      // tests make a page unreachable: window.__mockPageFail = new Set([projectId])
+      if ((window as unknown as { __mockPageFail?: Set<string> }).__mockPageFail?.has(projectId)) throw err('page_fetch', `${url}: HTTP 404`);
       const cached = pageCache.has(url);
       pageCache.add(url);
       const page = url.includes('printables')

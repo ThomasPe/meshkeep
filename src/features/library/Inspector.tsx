@@ -1,4 +1,4 @@
-import { Archive, Check, CloudOff, ExternalLink, FileBox, FolderHeart, FolderInput, Layers, Plus, Scale, Star, StarOff, Trash2, X } from 'lucide-react';
+import { Archive, Check, CloudOff, ExternalLink, FileBox, FolderHeart, FolderInput, Globe, Layers, Plus, Scale, Star, StarOff, Trash2, X } from 'lucide-react';
 import { DropdownMenu, DropdownMenuContent, DropdownMenuItem, DropdownMenuSeparator, DropdownMenuTrigger } from '@/components/ui/dropdown-menu';
 import { useState } from 'react';
 import { useTranslation } from 'react-i18next';
@@ -85,6 +85,7 @@ export function Inspector({ selectedIds, visible, tagCounts, facets, filterTitle
               ? <Button size="sm" variant="outline" onClick={() => actions.setFavoriteMany(sel, false)} data-testid="multi-unfavorite"><StarOff />{t('inspector.unfavoriteAll')}</Button>
               : <Button size="sm" variant="outline" onClick={() => actions.setFavoriteMany(sel, true)} data-testid="multi-favorite"><Star />{t('inspector.favoriteAll')}</Button>}
             <Button size="sm" variant="outline" onClick={() => actions.move(sel)} data-testid="multi-move"><FolderInput />{t('actions.move')}</Button>
+            <Button size="sm" variant="outline" onClick={() => actions.updateFromSource(sel)} data-testid="multi-source-update"><Globe />{t('sourceUpdate.action')}</Button>
             <Button size="sm" variant="destructive" onClick={() => actions.removeMany(sel)} data-testid="multi-delete"><Trash2 />{t('inspector.deleteSelected')}</Button>
           </div>
           <Section title={t('library.selected', { count: sel.length })}>

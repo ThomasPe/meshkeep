@@ -18,6 +18,8 @@ export interface ProjectActions {
   rerenderThumbnail: (p: ProjectSummary) => void;
   /** Opens the suggestion dialog: an AI answer, or what the model's web page says. */
   suggest: (p: ProjectSummary, mode: 'ai' | 'page') => void;
+  /** Multi-selection: opens the batch update from the projects' model pages (#69). */
+  updateFromSource: (ps: ProjectSummary[]) => void;
   /** Add to an existing collection (or `null` to create a new one first). */
   addToCollection: (p: ProjectSummary, collectionId: string | null) => void;
   /** Present only while a manual collection is being viewed. */
@@ -30,7 +32,7 @@ export interface ProjectActions {
   setFavoriteMany: (ps: ProjectSummary[], favorite: boolean) => void;
 }
 
-export type ProjectActionId = 'open' | 'favorite' | 'addToCollection' | 'removeFromCollection' | 'rename' | 'move' | 'reveal' | 'rerenderThumbnail' | 'suggest' | 'fetchPage' | 'pack' | 'unpack' | 'delete';
+export type ProjectActionId = 'open' | 'favorite' | 'addToCollection' | 'removeFromCollection' | 'rename' | 'move' | 'reveal' | 'rerenderThumbnail' | 'suggest' | 'fetchPage' | 'sourceUpdate' | 'pack' | 'unpack' | 'delete';
 
 /** One entry of a sub-menu (the collections of "Add to collection"). */
 export interface ProjectActionChoice {
@@ -103,6 +105,8 @@ export function projectActionItems(targets: ProjectSummary[], actions: ProjectAc
     items.push({ id: 'suggest', testId: 'suggest', label: t('inspector.suggest'), icon: Sparkles, disabled: p.offline, run: () => actions.suggest(p, 'ai') });
     items.push({ id: 'fetchPage', testId: 'fetch-page', label: t('inspector.page.suggest'), icon: Globe, disabled: p.offline, run: () => actions.suggest(p, 'page') });
   }
+  // one project has the dialog above; several get the batch, which asks once what to write
+  if (many) items.push({ id: 'sourceUpdate', testId: 'source-update', label: t('sourceUpdate.action'), icon: Globe, disabled: targets.every((x) => x.offline), run: () => actions.updateFromSource(targets) });
   if (packable.length > 0) items.push({ id: 'pack', testId: 'pack', label: t('actions.packN', { count: packable.length }), short: many ? undefined : t('actions.pack'), icon: Archive, disabled: false, run: () => actions.pack(packable) });
   if (unpackable.length > 0) items.push({ id: 'unpack', testId: 'unpack', label: t('actions.unpackN', { count: unpackable.length }), icon: PackageOpen, disabled: false, run: () => actions.unpack(unpackable) });
   items.push({ id: 'delete', testId: 'delete', label: t('actions.deleteN', { count: n }), icon: Trash2, disabled: movable.length === 0, destructive: true, separated: true, run: () => (many ? actions.removeMany(movable) : actions.remove(p)) });

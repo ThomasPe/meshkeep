@@ -762,6 +762,33 @@
     "fetchFailed_one": "{{count}} page could not be loaded",
     "fetchFailed_other": "{{count}} pages could not be loaded"
   },
+  "sourceUpdate": {
+    "action": "Update from source page…",
+    "title_one": "Update {{count}} project from its source page",
+    "title_other": "Update {{count}} projects from their source pages",
+    "body": "Reads the model page each project links to as its source and writes what it says into project.yaml. Projects are handled one after the other, one request per second.",
+    "what": "What to update",
+    "metadata": "Metadata",
+    "metadataNote": "Creator, license, description and tags; the title only when overwriting.",
+    "image": "Preview image",
+    "how": "Existing values",
+    "fill": "Only fill empty fields",
+    "fillNote": "What a project already has stays untouched, including a preview you chose.",
+    "overwrite": "Overwrite with the page",
+    "overwriteNote": "Title, creator, license, description and preview are replaced by what the page says. Tags are added, never removed.",
+    "start": "Update",
+    "progress": "{{done}} of {{total}}",
+    "cancelling": "Stopping after the current project…",
+    "totals": "{{updated}} updated · {{skipped}} skipped · {{failed}} failed",
+    "conflict": "project.yaml changed on disk in the meantime; nothing was overwritten.",
+    "partly": "Already written: {{fields}}.",
+    "skip": {
+      "no_link": "No source link",
+      "offline": "Library folder is offline",
+      "nothing_new": "Nothing new on the page",
+      "cancelled": "Cancelled before its turn"
+    }
+  },
   "hotkeys": {
     "title": "Keyboard shortcuts",
     "hint": "They work in the library while no dialog or menu is open and the cursor is not in a text field.",

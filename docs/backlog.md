@@ -182,8 +182,13 @@ submission is outside the code: Partner Center identity values, screenshots
       new project.yaml files (IMP-1a). Pictures (2026-11): a Bambu 3MF from MakerWorld
       supplies the page's cover as the preview and its model pictures in the gallery, offline
       (`threemf.rs`); for the other sites the page's cover picture is a tick box in the page
-      dialog and the MCP tool `set_page_thumbnail`, downloaded into `.meshkeep/cover.*`. Not
-      yet: the cover in batch page reads and in the import, the other pictures of a page.
+      dialog and the MCP tool `set_page_thumbnail`, downloaded into `.meshkeep/cover.*`.
+      Batch (#69): a multi-selection is updated from its source pages in one go (context
+      menu, inspector): one up-front choice (metadata, preview; only fill empty fields by
+      default, or overwrite), then the page dialog's steps per project, one after the other
+      at one request per second, with progress, cancel and a summary (updated, skipped,
+      failed with the reason); writes carry the stamp and are never forced. Not
+      yet: the cover in the import, the other pictures of a page.
 - [ ] **Organizational rules & maintenance tools** (IMP-7, IMP-8). Done so far: **move
       projects between folders** (dialog with folder picker and new sub-folder, multi-select,
       drag cards onto tree rows, Undo toast; collections, favorites, thumbnails and nested
