@@ -15,7 +15,7 @@ automated end-to-end check against the real desktop app (see `spec/04-quality.md
       Rust welcome).
 - [x] Decide the application shell: Tauri 2 + Rust engine (ADR-0001 accepted).
 - [x] **0.4 De-risking spike (Windows CI):** `spike/` + `.github/workflows/spike-windows.yml`
-      (removed 2026-11-20, preserved at tag `archive/spike`).
+      (removed 2026-11-20, last contained in commit `19988c4`).
       All four checks passed on `windows-latest` (run 1, 2026-10-17): (a) 1,002,528-triangle
       STL loads in WebView2, (b) 20 thumbnails rendered in a Web Worker via OffscreenCanvas
       and written by Rust, (c) WebdriverIO E2E against the real app passes, (d) MSIX built,
