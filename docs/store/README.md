@@ -74,6 +74,13 @@ produced by `release.yml` on tags. Store builds have no updater at all.
 
 `.github/workflows/release.yml` runs on every `v*` tag:
 
+0. **Identity gate.** Before anything is built, `msix/check-store-identity.ps1` checks the
+   three repository variables with the Partner Center identity (below). A tag without
+   them, or with a publisher that does not start with `CN=`, fails the run at once: the
+   workflow used to fall back to the side-load identity and attach a "Store" MSIX that
+   Partner Center rejects on upload. A manual run from a branch ("Run workflow") only warns
+   and packs with the side-load identity, which is enough to try the pipeline. CI runs the
+   gate's cases on every push (`msix/check-store-identity.test.ps1`).
 1. **Private installer.** `tauri-apps/tauri-action` builds the NSIS installer. When the
    secrets `TAURI_SIGNING_PRIVATE_KEY` and `TAURI_SIGNING_PRIVATE_KEY_PASSWORD` exist, the
    build carries the updater and the action publishes `latest.json` plus `.sig` files next
@@ -83,9 +90,29 @@ produced by `release.yml` on tags. Store builds have no updater at all.
    from the repository variables `MSIX_IDENTITY_NAME`, `MSIX_PUBLISHER`,
    `MSIX_PUBLISHER_DISPLAY_NAME`.
 3. **Side-load check.** The same exe is packed and self-signed, installed with
-   `Add-AppxPackage`, launched through its AUMID, and removed (`msix/sideload-test.ps1`).
-   CI does this on every push as well, so a broken manifest never reaches a release.
+   `Add-AppxPackage`, asked for an MCP answer through its app execution alias (see
+   "Inside the package" below), launched through its AUMID, and removed
+   (`msix/sideload-test.ps1`). CI does this on every push as well, so a broken manifest
+   never reaches a release.
 4. Both MSIX files are attached to the draft GitHub release.
+
+## Inside the package
+
+A packaged exe lives in `C:\Program Files\WindowsApps\<name>_<version>_x64__<id>\`. That
+path carries the version, so it changes with every Store update, and it is not a path
+other programs are meant to start. The MCP stdio bridge (`meshkeep --mcp`, ADR-0004) is
+exactly that case: Claude Desktop and similar clients launch a command from a
+configuration file the user pasted once.
+
+The manifest therefore registers the app execution alias `meshkeep.exe`
+(`uap3:AppExecutionAlias` in `msix/AppxManifest.xml`), which Windows keeps in
+`%LOCALAPPDATA%\Microsoft\WindowsApps\` for as long as the app is installed. Settings
+writes that alias into the client configuration when the app runs from a package and the
+plain exe path otherwise (`mcp_bridge::client_command`, decided by the exe's own path).
+`sideload-test.ps1` starts the bridge through the alias with pipes on stdin and stdout,
+the way a client does, and expects a JSON-RPC answer. A user can switch aliases off under
+Windows Settings → Apps → Advanced app settings → App execution aliases; then the bridge
+is not reachable until it is switched back on.
 
 ## One-time setup
 
@@ -114,7 +141,8 @@ Status: account created and the name **Meshkeep** reserved (2026-10-19); the dom
    - `MSIX_PUBLISHER` = `Package/Identity/Publisher` (`CN=<GUID>`)
    - `MSIX_PUBLISHER_DISPLAY_NAME` = `Package/Properties/PublisherDisplayName`
 4. Tag a release; upload `Meshkeep_<version>_x64_store.msix` from the release in the
-   Packages step of the submission.
+   Packages step of the submission. Until step 3 is done, a tag fails in the identity gate
+   and produces no release at all, the private installer included.
 
 ### Submission checklist
 
@@ -134,7 +162,13 @@ Status: account created and the name **Meshkeep** reserved (2026-10-19); the dom
   library grid with thumbnails, the project page with the 3D viewer, and the import
   dialog. Store assets (tile logos) are generated into `msix/Assets` from
   `src-tauri/icons/icon.png`.
-- Listing texts in `docs/store/listing.md`, English and German.
+- Listing texts in `docs/store/listing.md`, English and German, with the Store rules they
+  have to keep at the top of that file: seven search terms at most and no other products'
+  titles among them (policy 10.1.3).
+- Generative AI (policy 11.16): the AI suggestions make the app a product with live
+  generative AI content. The description discloses it, the submission declares it, and the
+  notes for certification name the reporting path (Settings → Feedback, support page).
+  Declaration and notes are in `docs/store/listing.md` under "Partner Center answers".
 
 ## Versioning
 

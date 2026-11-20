@@ -1165,8 +1165,9 @@ pub fn regenerate_mcp_token(app: AppHandle, state: State<AppState>) -> CmdResult
 }
 
 /// Server state plus what the Settings page needs to write the client configuration: the
-/// path of this executable (for the stdio bridge) and the user's downloads folder (the
-/// usual first import folder).
+/// command that starts the stdio bridge (this executable, or its alias in an MSIX install,
+/// see `mcp_bridge::client_command`) and the user's downloads folder (the usual first
+/// import folder).
 #[derive(Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct McpStatusView {
@@ -1246,7 +1247,7 @@ pub fn mcp_status(app: AppHandle, state: State<AppState>) -> McpStatusView {
     McpStatusView {
         status: state.mcp.status(port),
         exe_path: std::env::current_exe()
-            .map(|p| p.to_string_lossy().into_owned())
+            .map(|p| crate::mcp_bridge::client_command(&p.to_string_lossy(), std::env::var("LOCALAPPDATA").ok().as_deref()))
             .unwrap_or_default(),
         downloads_dir: app.path().download_dir().ok().map(|p| p.to_string_lossy().into_owned()),
     }

@@ -63,6 +63,9 @@ jobs:
     defaults: { run: { shell: pwsh } }
     steps:
       - uses: actions/checkout@v5
+      # release.yml only runs on tags; its gate for the Partner Center identity is tested here.
+      - name: Release gate (Store identity check, all cases)
+        run: ./msix/check-store-identity.test.ps1
       - uses: actions/setup-node@v5
         with: { node-version: 22, cache: npm }
       - uses: dtolnay/rust-toolchain@stable

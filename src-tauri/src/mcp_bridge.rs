@@ -8,6 +8,28 @@ use std::time::Duration;
 
 pub const DEFAULT_URL: &str = "http://127.0.0.1:7340/mcp";
 
+/// The app execution alias the MSIX registers (`msix/AppxManifest.xml`).
+pub const ALIAS: &str = "meshkeep.exe";
+
+/// The command an MCP client launches for this bridge, as Settings shows it.
+///
+/// Normally that is the running exe. In an MSIX install the exe lives below `WindowsApps`
+/// in a folder named after the package version, so a path copied into a client's
+/// configuration would break with every Store update. There the answer is the app
+/// execution alias in `%LOCALAPPDATA%\Microsoft\WindowsApps`, which stays put and is the
+/// supported way for another program to start a packaged exe; without `LOCALAPPDATA` the
+/// bare alias name, since that folder is on the user's `PATH`.
+/// Works on strings so the Windows paths can be tested on any platform.
+pub fn client_command(exe: &str, local_app_data: Option<&str>) -> String {
+    if !exe.to_ascii_lowercase().contains("\\windowsapps\\") {
+        return exe.to_string();
+    }
+    match local_app_data.map(|d| d.trim_end_matches('\\')).filter(|d| !d.is_empty()) {
+        Some(dir) => format!("{dir}\\Microsoft\\WindowsApps\\{ALIAS}"),
+        None => ALIAS.to_string(),
+    }
+}
+
 /// Runs until stdin closes. Returns the process exit code.
 pub fn run(url: &str, token: &str) -> i32 {
     let client = match reqwest::blocking::Client::builder().timeout(Duration::from_secs(900)).build() {
@@ -81,5 +103,31 @@ pub fn forward(client: &reqwest::blocking::Client, url: &str, token: &str, line:
         } else {
             format!("cannot reach Meshkeep: {e}")
         }),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn an_installed_or_dev_exe_is_launched_by_its_own_path() {
+        let nsis = r"C:\Users\me\AppData\Local\Meshkeep\meshkeep.exe";
+        assert_eq!(client_command(nsis, Some(r"C:\Users\me\AppData\Local")), nsis);
+        assert_eq!(client_command("/usr/bin/meshkeep", None), "/usr/bin/meshkeep");
+    }
+
+    #[test]
+    fn a_packaged_exe_is_launched_through_its_alias() {
+        let packaged = r"C:\Program Files\WindowsApps\12345DevSym.Meshkeep_0.2.1.0_x64__abcdefgh12345\meshkeep.exe";
+        let alias = r"C:\Users\me\AppData\Local\Microsoft\WindowsApps\meshkeep.exe";
+        assert_eq!(client_command(packaged, Some(r"C:\Users\me\AppData\Local")), alias);
+        assert_eq!(client_command(packaged, Some(r"C:\Users\me\AppData\Local\")), alias);
+        // Apps moved to another drive live in `<drive>:\WindowsApps`.
+        let moved = r"D:\WindowsApps\12345DevSym.Meshkeep_0.2.1.0_x64__abcdefgh12345\meshkeep.exe";
+        assert_eq!(client_command(moved, Some(r"C:\Users\me\AppData\Local")), alias);
+        // No LOCALAPPDATA: the alias folder is on the user's PATH.
+        assert_eq!(client_command(packaged, None), "meshkeep.exe");
+        assert_eq!(client_command(packaged, Some("")), "meshkeep.exe");
     }
 }
