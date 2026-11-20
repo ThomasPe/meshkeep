@@ -26,7 +26,9 @@ Meshkeep exposes its engine as an MCP server, inside the running app.
    JSON-RPC over HTTP (the Streamable HTTP transport, POST only, JSON responses, no SSE,
    no session ids). The same executable started as `meshkeep --mcp [url] [token]` is a
    stdio bridge that forwards lines to that endpoint, for clients that only launch
-   commands (Claude Desktop). One process owns the engine, the index and the watchers;
+   commands (Claude Desktop). The Store build registers the app execution alias
+   `meshkeep.exe` for it, because the path of a packaged exe changes with every update
+   (`docs/store/README.md`, "Inside the package"). One process owns the engine, the index and the watchers;
    the window sees every change an agent makes through the same events the commands
    emit.
 2. **Access.** Off by default. Every request carries a bearer token the app mints when

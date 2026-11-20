@@ -83,9 +83,29 @@ produced by `release.yml` on tags. Store builds have no updater at all.
    from the repository variables `MSIX_IDENTITY_NAME`, `MSIX_PUBLISHER`,
    `MSIX_PUBLISHER_DISPLAY_NAME`.
 3. **Side-load check.** The same exe is packed and self-signed, installed with
-   `Add-AppxPackage`, launched through its AUMID, and removed (`msix/sideload-test.ps1`).
-   CI does this on every push as well, so a broken manifest never reaches a release.
+   `Add-AppxPackage`, asked for an MCP answer through its app execution alias (see
+   "Inside the package" below), launched through its AUMID, and removed
+   (`msix/sideload-test.ps1`). CI does this on every push as well, so a broken manifest
+   never reaches a release.
 4. Both MSIX files are attached to the draft GitHub release.
+
+## Inside the package
+
+A packaged exe lives in `C:\Program Files\WindowsApps\<name>_<version>_x64__<id>\`. That
+path carries the version, so it changes with every Store update, and it is not a path
+other programs are meant to start. The MCP stdio bridge (`meshkeep --mcp`, ADR-0004) is
+exactly that case: Claude Desktop and similar clients launch a command from a
+configuration file the user pasted once.
+
+The manifest therefore registers the app execution alias `meshkeep.exe`
+(`uap3:AppExecutionAlias` in `msix/AppxManifest.xml`), which Windows keeps in
+`%LOCALAPPDATA%\Microsoft\WindowsApps\` for as long as the app is installed. Settings
+writes that alias into the client configuration when the app runs from a package and the
+plain exe path otherwise (`mcp_bridge::client_command`, decided by the exe's own path).
+`sideload-test.ps1` starts the bridge through the alias with pipes on stdin and stdout,
+the way a client does, and expects a JSON-RPC answer. A user can switch aliases off under
+Windows Settings → Apps → Advanced app settings → App execution aliases; then the bridge
+is not reachable until it is switched back on.
 
 ## One-time setup
 
@@ -134,7 +154,13 @@ Status: account created and the name **Meshkeep** reserved (2026-10-19); the dom
   library grid with thumbnails, the project page with the 3D viewer, and the import
   dialog. Store assets (tile logos) are generated into `msix/Assets` from
   `src-tauri/icons/icon.png`.
-- Listing texts in `docs/store/listing.md`, English and German.
+- Listing texts in `docs/store/listing.md`, English and German, with the Store rules they
+  have to keep at the top of that file: seven search terms at most and no other products'
+  titles among them (policy 10.1.3).
+- Generative AI (policy 11.16): the AI suggestions make the app a product with live
+  generative AI content. The description discloses it, the submission declares it, and the
+  notes for certification name the reporting path (Settings → Feedback, support page).
+  Declaration and notes are in `docs/store/listing.md` under "Partner Center answers".
 
 ## Versioning
 
