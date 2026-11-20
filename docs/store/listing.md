@@ -42,7 +42,7 @@ connections except, in non-Store builds, an optional manual check for updates ag
 GitHub. Metadata you enter is saved as files inside the folders you chose.
 
 **Copyright and trademark info:** © Thomas Pentenrieder. Source available under the
-PolyForm Noncommercial License 1.0.0 (github.com/ThomasPe/my-meshes).
+PolyForm Noncommercial License 1.0.0 (github.com/ThomasPe/meshkeep).
 
 ## Deutsch
 

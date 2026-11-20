@@ -105,7 +105,7 @@ test('feedback: the dialog opens a prefilled GitHub issue with version and syste
   const opened = await page.evaluate(() => (window as unknown as { __mockOpened?: string[] }).__mockOpened ?? []);
   expect(opened).toHaveLength(1);
   const url = new URL(opened[0]!);
-  expect(url.pathname).toBe('/ThomasPe/my-meshes/issues/new');
+  expect(url.pathname).toBe('/ThomasPe/meshkeep/issues/new');
   expect(url.searchParams.get('template')).toBe('bug_report.yml');
   expect(url.searchParams.get('title')).toBe('[Bug] Viewer stays on reading');
   expect(url.searchParams.get('description')).toBe('Opened a 3MF, nothing happens.');
