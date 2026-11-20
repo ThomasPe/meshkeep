@@ -264,7 +264,8 @@ export function createMockBackend(): Backend {
         for (const seg of p.rel_path.split('/').filter(Boolean)) { if (!cur.children.has(seg)) cur.children.set(seg, { count: 0, isProject: false, children: new Map() }); cur = cur.children.get(seg)!; cur.count++; }
         cur.isProject = true;
       }
-      const build = (prefix: string, n: N): FolderNode[] => [...n.children.entries()].sort(([a], [b]) => a.localeCompare(b)).map(([name, c]) => { const rel = prefix ? `${prefix}/${name}` : name; return { name, rel_path: rel, project_count: c.count, is_project: c.isProject, children: build(rel, c) }; });
+      // byte order like the engine's BTreeMap; the display order is made in `useFolderTree`
+      const build = (prefix: string, n: N): FolderNode[] => [...n.children.entries()].sort(([a], [b]) => (a < b ? -1 : a > b ? 1 : 0)).map(([name, c]) => { const rel = prefix ? `${prefix}/${name}` : name; return { name, rel_path: rel, project_count: c.count, is_project: c.isProject, children: build(rel, c) }; });
       return build('', root);
     },
     // hints: a ".url" file stands for a Printables shortcut, file names for their shared prefix

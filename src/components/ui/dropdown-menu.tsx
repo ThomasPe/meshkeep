@@ -7,6 +7,7 @@ const DropdownMenu = DropdownMenuPrimitive.Root;
 const DropdownMenuTrigger = DropdownMenuPrimitive.Trigger;
 const DropdownMenuGroup = DropdownMenuPrimitive.Group;
 const DropdownMenuRadioGroup = DropdownMenuPrimitive.RadioGroup;
+const DropdownMenuSub = DropdownMenuPrimitive.Sub;
 
 const contentClass = 'z-50 min-w-[10rem] overflow-hidden rounded-xl border border-border bg-popover p-1.5 text-popover-foreground shadow-card-hover animate-in fade-in-0 zoom-in-95';
 const itemClass = "relative flex cursor-default select-none items-center gap-2 rounded-lg px-2.5 py-1.5 text-sm font-semibold outline-none focus:bg-secondary data-[disabled]:pointer-events-none data-[disabled]:opacity-50 [&_svg:not([class*='size-'])]:size-4 data-[variant=destructive]:text-destructive";
@@ -20,6 +21,20 @@ function DropdownMenuContent({ className, sideOffset = 4, ...props }: React.Comp
 }
 function DropdownMenuItem({ className, variant, ...props }: React.ComponentProps<typeof DropdownMenuPrimitive.Item> & { variant?: 'default' | 'destructive' }) {
   return <DropdownMenuPrimitive.Item data-variant={variant} className={cn(itemClass, className)} {...props} />;
+}
+function DropdownMenuSubTrigger({ className, children, ...props }: React.ComponentProps<typeof DropdownMenuPrimitive.SubTrigger>) {
+  return (
+    <DropdownMenuPrimitive.SubTrigger className={cn(itemClass, 'data-[state=open]:bg-secondary', className)} {...props}>
+      {children}<span className="ml-auto text-muted-foreground">›</span>
+    </DropdownMenuPrimitive.SubTrigger>
+  );
+}
+function DropdownMenuSubContent({ className, ...props }: React.ComponentProps<typeof DropdownMenuPrimitive.SubContent>) {
+  return (
+    <DropdownMenuPrimitive.Portal>
+      <DropdownMenuPrimitive.SubContent className={cn(contentClass, className)} {...props} />
+    </DropdownMenuPrimitive.Portal>
+  );
 }
 function DropdownMenuRadioItem({ className, children, ...props }: React.ComponentProps<typeof DropdownMenuPrimitive.RadioItem>) {
   return (
@@ -44,4 +59,4 @@ function DropdownMenuSeparator({ className, ...props }: React.ComponentProps<typ
   return <DropdownMenuPrimitive.Separator className={cn('-mx-1 my-1 h-px bg-border', className)} {...props} />;
 }
 
-export { DropdownMenu, DropdownMenuTrigger, DropdownMenuContent, DropdownMenuItem, DropdownMenuCheckboxItem, DropdownMenuRadioGroup, DropdownMenuRadioItem, DropdownMenuLabel, DropdownMenuSeparator, DropdownMenuGroup };
+export { DropdownMenu, DropdownMenuTrigger, DropdownMenuContent, DropdownMenuItem, DropdownMenuCheckboxItem, DropdownMenuRadioGroup, DropdownMenuRadioItem, DropdownMenuLabel, DropdownMenuSeparator, DropdownMenuGroup, DropdownMenuSub, DropdownMenuSubTrigger, DropdownMenuSubContent };

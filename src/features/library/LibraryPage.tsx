@@ -17,6 +17,7 @@ import { useLibraryActions } from '@/features/library/useLibraryActions';
 import { useProjectActions } from '@/features/library/useProjectActions';
 import { folderCrumbs } from '@/lib/crumbs';
 import { reportError } from '@/lib/errors';
+import { useHotkeys } from '@/lib/hotkeys';
 import { useAddToCollection, useCollections, useFacets, useProjects, useReorderCollection, useRoots, useSmartCollections, useSmartProjects, useTagCounts } from '@/lib/queries';
 import { navigate } from '@/lib/router';
 import { useUi } from '@/lib/store';
@@ -78,14 +79,19 @@ export function LibraryPage({ scanning, onScanEnd }: { scanning: ScanState; onSc
   const pending = smartId ? smartProjects.isPending : projects.isPending;
   const selectedSet = useMemo(() => new Set(selected), [selected]);
 
+  // An added project goes to the end of the selection, which is where Shift-click takes its
+  // range anchor from; after a removal the anchor is the last one still selected.
+  const onToggle = useCallback((id: string) => {
+    select(selected.includes(id) ? selected.filter((x) => x !== id) : [...selected, id]);
+  }, [select, selected]);
   const onSelect = useCallback((id: string, e: React.MouseEvent) => {
-    if (e.ctrlKey || e.metaKey) select(selected.includes(id) ? selected.filter((x) => x !== id) : [...selected, id]);
+    if (e.ctrlKey || e.metaKey) onToggle(id);
     else if (e.shiftKey && selected.length) {
       const ids = list.map((p) => p.id);
       const a = ids.indexOf(selected[selected.length - 1]!), b = ids.indexOf(id);
       select([...new Set([...selected, ...ids.slice(Math.min(a, b), Math.max(a, b) + 1)])]);
     } else select([id]);
-  }, [select, selected, list]);
+  }, [select, selected, list, onToggle]);
   const onOpen = useCallback((id: string) => navigate({ page: 'project', id }), []);
 
   const rootName = (id: string) => roots.data?.find((r) => r.id === id)?.path.split(/[\\/]/).filter(Boolean).pop() ?? '';
@@ -105,19 +111,26 @@ export function LibraryPage({ scanning, onScanEnd }: { scanning: ScanState; onSc
   const activeRoot = rootScoped ? filter.rootId : roots.data?.[0]?.id;
   const filtered = tags.length > 0 || !!text || !!creator || !!license || !!material || !!fileType;
   const single = selected.length === 1 ? list.find((p) => p.id === selected[0]) : undefined;
-  const onKey = (e: React.KeyboardEvent) => {
-    if (e.target instanceof HTMLInputElement || e.target instanceof HTMLTextAreaElement) return;
-    // Keys pressed in a context menu or dropdown that was opened from here arrive too: those
-    // live in a portal, but React events bubble along the component tree. They belong to the
-    // menu, so the Escape that closes it must not clear the selection as well. That it mostly
-    // did not was luck: the menu is usually removed before this handler runs, but not while it
-    // is still animating.
-    if (!e.currentTarget.contains(e.target as Node)) return;
-    if (e.key === 'Escape' && selected.length) select([]);
-    if (e.key === 'Delete' && single) { e.preventDefault(); actions.remove(single); }
-    else if (e.key === 'Delete' && selected.length > 1) { e.preventDefault(); actions.removeMany(list.filter((p) => selected.includes(p.id))); }
-    if (e.key === 'F2' && single) { e.preventDefault(); actions.rename(single); }
-  };
+  // Shortcuts (#68); the rules about text fields and open menus live in `useHotkeys`. Select
+  // all works from anywhere on the page; the keys that act on the selection only while the
+  // focus is in the project area or nowhere, so Delete or Enter in the folder tree or the
+  // inspector keeps meaning what it means there.
+  const mainRef = useRef<HTMLElement | null>(null);
+  const inMain = (e: KeyboardEvent) => e.target === document.body || (e.target instanceof Node && !!mainRef.current?.contains(e.target));
+  useHotkeys({
+    // every project in view, not only the rows the virtual list has rendered
+    selectAll: () => { if (special || list.length === 0) return false; select(list.map((p) => p.id)); },
+    clearSelection: (e) => { if (!inMain(e) || selected.length === 0) return false; select([]); },
+    delete: (e) => {
+      if (!inMain(e) || selected.length === 0) return false;
+      if (single) actions.remove(single);
+      else if (selected.length > 1) actions.removeMany(list.filter((p) => selectedSet.has(p.id)));
+      else return false;
+    },
+    rename: (e) => { if (!inMain(e) || !single) return false; actions.rename(single); },
+    // a focused card, row or button answers Enter itself
+    open: (e) => { if (!inMain(e) || !single || (e.target instanceof Element && e.target.closest('a, button, summary, [tabindex]'))) return false; onOpen(single.id); },
+  });
   const saveSmart = () => openCollectionDialog({ kind: 'createSmart', query: { root_id: query.root_id, path_prefix: query.path_prefix, tags: query.tags, text: query.text, favorites: query.favorites, creator, license, material, file_type: fileType, sort: effectiveSort === 'collection' ? 'modified' : effectiveSort } });
   const onReorder = collectionId && effectiveSort === 'collection' ? (ids: string[]) => reorder.mutate({ id: collectionId, order: ids }, { onError: reportError }) : undefined;
 
@@ -128,7 +141,7 @@ export function LibraryPage({ scanning, onScanEnd }: { scanning: ScanState; onSc
       <Panel id="main" minSize={360} className="min-w-0">
       {/* the one column never grows past the panel: a wide child (the list's table) scrolls
           inside itself instead of pushing the toolbar and the whole panel sideways (#64) */}
-      <main className="grid h-full min-h-0 grid-cols-[minmax(0,1fr)] grid-rows-[auto_minmax(0,1fr)]" onKeyDown={onKey}>
+      <main className="grid h-full min-h-0 grid-cols-[minmax(0,1fr)] grid-rows-[auto_minmax(0,1fr)]" ref={mainRef} data-testid="library-main" data-selected-count={selected.length}>
         <Toolbar title={filterTitle} crumbs={crumbs} count={special ? 0 : list.length} onRescan={activeRoot && !special ? () => void scan(activeRoot) : undefined} scanning={!!activeRoot && activeRoot in scanning} sortLocked={filter.kind === 'recent' || special} onImport={() => void pickImport()} onSaveSmart={filtered && !special && filter.kind !== 'collection' && filter.kind !== 'smart' ? saveSmart : undefined} collectionSort={filter.kind === 'collection'} />
         {filter.kind === 'creators' ? (
           <CreatorSuggestionsView />
@@ -146,7 +159,7 @@ export function LibraryPage({ scanning, onScanEnd }: { scanning: ScanState; onSc
             </div>
           </div>
         ) : view === 'grid' ? (
-          <ProjectGrid projects={list} tile={tile} selected={selectedSet} onSelect={onSelect} onOpen={onOpen} onTag={toggleTag} actions={actions} onReorder={onReorder} />
+          <ProjectGrid projects={list} tile={tile} selected={selectedSet} onSelect={onSelect} onToggle={onToggle} onOpen={onOpen} onTag={toggleTag} actions={actions} onReorder={onReorder} />
         ) : (
           <ProjectList projects={list} selected={selectedSet} sort={effectiveSort} onSort={setSort} onSelect={onSelect} onOpen={onOpen} onTag={toggleTag} actions={actions} />
         )}

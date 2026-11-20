@@ -63,6 +63,7 @@
     "files_other": "{{count}} Dateien",
     "selected_one": "{{count}} ausgewählt",
     "selected_other": "{{count}} ausgewählt",
+    "selectProject": "{{title}} auswählen",
     "columns": {
       "title": "Titel",
       "creator": "Designer",
@@ -477,6 +478,7 @@
     "removeN_other": "{{count}} aus Favoriten entfernen"
   },
   "actions": {
+    "more": "Weitere Aktionen",
     "rename": "Umbenennen",
     "renameTitle": "Projektordner umbenennen",
     "renameBody": "Der Ordner auf der Festplatte wird umbenannt. Tags und Metadaten in der project.yaml bleiben erhalten.",
@@ -759,5 +761,25 @@
     "fetched": "Seiten gelesen: {{fetched}} geladen, {{cached}} aus dem Cache, {{noLink}} Projekte ohne Link",
     "fetchFailed_one": "{{count}} Seite konnte nicht geladen werden",
     "fetchFailed_other": "{{count}} Seiten konnten nicht geladen werden"
+  },
+  "hotkeys": {
+    "title": "Tastenkürzel",
+    "hint": "Sie gelten in der Bibliothek, solange kein Dialog oder Menü offen ist und der Cursor nicht in einem Textfeld steht.",
+    "actions": {
+      "selectAll": "Alle angezeigten Projekte auswählen",
+      "open": "Ausgewähltes Projekt öffnen",
+      "rename": "Ausgewähltes Projekt umbenennen",
+      "delete": "Auswahl in den Papierkorb verschieben (mit Rückfrage)",
+      "clearSelection": "Auswahl aufheben",
+      "focusSearch": "Bibliothek durchsuchen"
+    },
+    "keys": {
+      "ctrl": "Strg",
+      "cmd": "⌘",
+      "enter": "Enter",
+      "delete": "Entf",
+      "backspace": "⌫",
+      "escape": "Esc"
+    }
   }
 }

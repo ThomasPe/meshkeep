@@ -1,4 +1,4 @@
-import { Archive, ChevronLeft, CloudOff, FolderOpen, ImageUp, PackageOpen, Pencil, RotateCcw, Star, Trash2 } from 'lucide-react';
+import { Archive, ChevronLeft, CloudOff, ImageUp, RotateCcw, Star } from 'lucide-react';
 import { useState } from 'react';
 import { useTranslation } from 'react-i18next';
 import { Badge } from '@/components/ui/badge';
@@ -6,6 +6,8 @@ import { Button } from '@/components/ui/button';
 import { DropdownMenu, DropdownMenuContent, DropdownMenuItem, DropdownMenuTrigger } from '@/components/ui/dropdown-menu';
 import { Tabs, TabsContent, TabsList, TabsTrigger } from '@/components/ui/tabs';
 import { Breadcrumbs } from '@/features/library/Breadcrumbs';
+import { ProjectActionBar } from '@/features/library/ProjectActionBar';
+import { toSummary } from '@/features/library/projectActions';
 import { Thumb } from '@/features/library/Thumb';
 import { useProjectActions } from '@/features/library/useProjectActions';
 import { FilesTable } from '@/features/project/FilesTable';
@@ -18,7 +20,6 @@ import { formatBytes, initials } from '@/lib/format';
 import { useEmbeddedPictures, useProject, useRoots } from '@/lib/queries';
 import { navigate, routeHref } from '@/lib/router';
 import { useFileThumbListing, useFileThumbScope } from '@/lib/thumbs/useFileThumb';
-import type { ProjectSummary } from '@/lib/types';
 import { cn } from '@/lib/utils';
 
 export function ProjectPage({ id }: { id: string }) {
@@ -42,7 +43,7 @@ export function ProjectPage({ id }: { id: string }) {
   // without the root (still loading, or gone) the trail starts at the first folder
   const trail = folderCrumbs(p.root_id, root?.path ?? '', p.rel_path).slice(root || !p.rel_path ? 0 : 1);
   const imageCount = p.files.filter((f) => f.kind === 'image').length + (pictures.data?.length ?? 0);
-  const summary: ProjectSummary = { id: p.id, root_id: p.root_id, rel_path: p.rel_path, title: p.title, creator: p.creator, tags: p.tags, thumbnail: p.thumbnail, file_count: p.files.length, model_count: p.model_count, total_bytes: p.total_bytes, modified: p.modified, has_sidecar: p.sidecar.state === 'ok', offline: p.offline, favorite: p.favorite, added: p.added, thumb: p.thumb, slicer: p.slicer, packed: p.packed };
+  const summary = toSummary(p);
   return (
     <div className="h-full overflow-auto" data-testid="project-page">
       {dialogs}
@@ -70,7 +71,7 @@ export function ProjectPage({ id }: { id: string }) {
           <div className="grid min-w-[200px] flex-1 gap-1">
             <div className="flex items-center gap-2">
               <h1 className="text-2xl font-extrabold tracking-tight" data-testid="project-title">{p.title}</h1>
-              <Button size="icon-sm" variant="ghost" aria-pressed={p.favorite} aria-label={p.favorite ? t('favorites.remove') : t('favorites.add')} title={p.favorite ? t('favorites.remove') : t('favorites.add')} data-testid="project-favorite" onClick={() => actions.toggleFavorite(summary)} className={cn(p.favorite && 'text-warning')}><Star className={cn(p.favorite && 'fill-current')} /></Button>
+              <Button size="icon-sm" variant="ghost" aria-pressed={p.favorite} aria-label={p.favorite ? t('favorites.remove') : t('favorites.add')} title={p.favorite ? t('favorites.remove') : t('favorites.add')} data-testid="project-favorite" data-action="favorite" onClick={() => actions.toggleFavorite(summary)} className={cn(p.favorite && 'text-warning')}><Star className={cn(p.favorite && 'fill-current')} /></Button>
             </div>
             <div className="flex flex-wrap items-center gap-2.5 text-[13px] font-semibold text-muted-foreground">
               {p.creator ? <><span className="grid size-5 place-items-center rounded-full bg-accent text-[9px] font-extrabold text-accent-foreground">{initials(p.creator)}</span>{p.creator}</> : t('library.unknownCreator')}
@@ -80,14 +81,8 @@ export function ProjectPage({ id }: { id: string }) {
               {p.offline && <Badge variant="outline"><CloudOff />{t('library.offline')}</Badge>}
             </div>
           </div>
-          <div className="flex flex-wrap gap-2">
-            {p.packed
-              ? <Button variant="outline" disabled={p.offline} onClick={() => actions.unpack([summary])} data-testid="project-unpack"><PackageOpen />{t('actions.unpack')}</Button>
-              : <Button variant="outline" disabled={p.offline || p.rel_path === '' || p.model_count === 0} onClick={() => actions.pack([summary])} data-testid="project-pack"><Archive />{t('actions.pack')}</Button>}
-            <Button variant="outline" disabled={p.offline} onClick={() => actions.reveal(summary)}><FolderOpen />{t('inspector.reveal')}</Button>
-            <Button variant="outline" disabled={p.offline || p.rel_path === ''} onClick={() => actions.rename(summary)} data-testid="project-rename"><Pencil />{t('actions.rename')}</Button>
-            <Button variant="outline" disabled={p.offline || p.rel_path === ''} onClick={() => actions.remove(summary)} data-testid="project-delete" className="text-destructive hover:text-destructive"><Trash2 />{t('actions.delete')}</Button>
-          </div>
+          {/* every project action (#70): the usual ones as buttons, the rest under "more" */}
+          <ProjectActionBar project={summary} actions={actions} prefix="project" exclude={['open', 'favorite']} labeled={['pack', 'unpack', 'reveal', 'rename', 'delete']} inline={['pack', 'unpack', 'reveal', 'rename', 'delete']} />
         </div>
         <Tabs value={tab} onValueChange={setTab}>
           <TabsList>

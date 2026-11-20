@@ -15,12 +15,14 @@ interface Props {
   /** Current selection (summaries), so the context menu can act on all of it. */
   selection?: ProjectSummary[];
   onSelect: (e: React.MouseEvent) => void;
+  /** The check mark: adds the project to the selection or takes it out, the rest stays (#72). */
+  onToggle: () => void;
   onOpen: () => void;
   onTag: (tag: string) => void;
   actions: ProjectActions;
 }
 
-export const ProjectCard = memo(function ProjectCard({ project: p, selected, selection, onSelect, onOpen, onTag, actions }: Props) {
+export const ProjectCard = memo(function ProjectCard({ project: p, selected, selection, onSelect, onToggle, onOpen, onTag, actions }: Props) {
   const { t, i18n } = useTranslation();
   return (
     <ProjectMenu project={p} selection={selection} actions={actions}>
@@ -36,7 +38,22 @@ export const ProjectCard = memo(function ProjectCard({ project: p, selected, sel
         className={cn('group relative flex h-full flex-col overflow-hidden rounded-2xl border-2 border-transparent bg-card shadow-card outline-none transition-[transform,box-shadow] hover:-translate-y-0.5 hover:shadow-card-hover focus-visible:border-ring', selected && 'border-primary', p.offline && 'opacity-75')}
       >
         <Thumb thumb={p.thumb} projectId={p.id} className="aspect-square shrink-0">
-          <span className={cn('absolute left-3 top-3 grid size-5.5 place-items-center rounded-full bg-card text-primary opacity-0 shadow-card transition-opacity group-hover:opacity-100', selected && 'bg-primary text-primary-foreground opacity-100')}><Check className="size-3.5" /></span>
+          {/* A real toggle, not decoration (#72): it changes only this card's membership, where a
+              click on the card replaces the selection. Its events stay off the card, which would
+              select, open (double-click, Enter) or toggle a second time (Space). */}
+          <button
+            type="button"
+            role="checkbox"
+            data-testid="card-select"
+            aria-checked={selected}
+            aria-label={t('library.selectProject', { title: p.title })}
+            onClick={(e) => { e.stopPropagation(); onToggle(); }}
+            onDoubleClick={(e) => e.stopPropagation()}
+            onKeyDown={(e) => e.stopPropagation()}
+            className={cn('absolute left-3 top-3 grid size-5.5 place-items-center rounded-full bg-card text-primary opacity-0 shadow-card outline-none transition-opacity group-hover:opacity-100 focus-visible:opacity-100 focus-visible:ring-2 focus-visible:ring-ring', selected && 'bg-primary text-primary-foreground opacity-100')}
+          >
+            <Check className="size-3.5" />
+          </button>
           <button
             type="button"
             data-testid="card-favorite"
