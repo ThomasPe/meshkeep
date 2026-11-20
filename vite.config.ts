@@ -8,7 +8,7 @@ export default defineConfig({
   plugins: [react(), tailwindcss()],
   resolve: { alias: { '@': fileURLToPath(new URL('./src', import.meta.url)) } },
   clearScreen: false,
-  server: { port: 1420, strictPort: true, host: host || false, watch: { ignored: ['**/src-tauri/**', '**/crates/**', '**/target/**', '**/spike/**'] } },
+  server: { port: 1420, strictPort: true, host: host || false, watch: { ignored: ['**/src-tauri/**', '**/crates/**', '**/target/**'] } },
   envPrefix: ['VITE_', 'TAURI_ENV_*'],
   build: {
     target: process.env.TAURI_ENV_PLATFORM === 'windows' ? 'chrome105' : 'safari13',

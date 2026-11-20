@@ -5,7 +5,8 @@
 | `spec/` | Product specification, technology-neutral. Start with `01-vision.md`. |
 | `backlog.md` | Phased product backlog derived from the spec. |
 | `open-questions.md` | Unresolved points, referenced from the spec as **[Q#]**. |
-| `decisions/` | Architecture decision records: tech stack, UI framework, … |
+| `decisions/` | Architecture decision records: tech stack, UI framework, AI assistance, MCP server. |
+| `store/` | Microsoft Store release pipeline and listing texts. |
 | `mockups/` | Reference image and interactive HTML-only UI mockups used to compare visual directions. |
 
 ## Spec
@@ -20,3 +21,4 @@
 - [ADR-0001 Application shell / tech stack](decisions/0001-tech-stack.md)
 - [ADR-0002 UI framework and visual direction](decisions/0002-ui-framework.md)
 - [ADR-0003 AI assistance with a user-supplied API key](decisions/0003-ai-integration.md)
+- [ADR-0004 MCP server for AI agents](decisions/0004-mcp-server.md)

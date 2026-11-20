@@ -16,7 +16,7 @@ name: Dev channel
 on:
   push:
     branches: ['main']
-    paths-ignore: ['docs/**', 'spike/**', 'site/**', '*.md']
+    paths-ignore: ['docs/**', 'site/**', '*.md']
   workflow_dispatch:
 
 permissions:

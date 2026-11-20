@@ -7,7 +7,7 @@ const info: AppInfo = { version: '0.1.0-dev.31', dataDir: 'x', testMode: false, 
 describe('feedback', () => {
   it('prefills the bug form by field id', () => {
     const url = new URL(buildIssueUrl({ kind: 'bug', title: 'Viewer stuck', details: 'stays on "reading"', environment: environmentBlock(info, { projects: 72, locale: 'de' }), logHint: true }));
-    expect(url.origin + url.pathname).toBe('https://github.com/ThomasPe/my-meshes/issues/new');
+    expect(url.origin + url.pathname).toBe('https://github.com/ThomasPe/meshkeep/issues/new');
     expect(url.searchParams.get('template')).toBe('bug_report.yml');
     expect(url.searchParams.get('title')).toBe('[Bug] Viewer stuck');
     expect(url.searchParams.get('labels')).toBe('bug,from-app');

@@ -7,7 +7,7 @@
 import { create } from 'zustand';
 import type { AppInfo } from '@/lib/types';
 
-export const REPO = 'ThomasPe/my-meshes';
+export const REPO = 'ThomasPe/meshkeep';
 export type FeedbackKind = 'bug' | 'idea' | 'other';
 
 export interface FeedbackPreset {

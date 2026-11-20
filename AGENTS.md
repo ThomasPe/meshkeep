@@ -122,8 +122,7 @@ Browser mode (`npm run dev`, Playwright) uses the mock backend, which synthesize
   change that extends the command API switches this to generated types (`tauri-specta`).
 - Tooling: Claude Code is the primary agent, Copilot secondary; both follow this file.
   Package manager is npm (lockfile committed).
-- Commits: imperative subject, body explains why. Keep the spike (`spike/`) untouched; it
-  is reference material until Epic 3 replaces it.
+- Commits: imperative subject, body explains why.
 - Do not add dependencies without a line in the PR description saying why.
 - License: PolyForm Noncommercial 1.0.0 (`LICENSE`, required notice in `NOTICE`); the Store build ships under the
   copyright holder's own terms. New dependencies must be permissively licensed (MIT,
@@ -147,4 +146,4 @@ Browser mode (`npm run dev`, Playwright) uses the mock backend, which synthesize
 | Design tokens | `src/styles/globals.css` |
 | i18n | `src/i18n/{en,de}.json` |
 | Tests | `tests/{unit,ui,e2e}`, `crates/engine/tests` |
-| CI | `.github/workflows/ci.yml` (spike has its own workflow) |
+| CI | `.github/workflows/ci.yml` |
