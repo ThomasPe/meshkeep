@@ -21,7 +21,7 @@ file keeps the record of what was decided and when.
 | Q13 | Languages | English and German at launch (2026-10-18). | `spec/03-features.md` APP-3 |
 | Q14 | Frameless window | No; native title bar (2026-10-18). | `spec/03-features.md` APP-10 |
 | Q15 | Name and branding | **Meshkeep** (2026-10-18). Identifier `de.devsym.meshkeep`, sidecar/ignore folder `.meshkeep`, env prefix `MESHKEEP_*`. Store name reserved in Partner Center and domain meshkeep.app registered (2026-10-19); GitHub repository renamed from `my-meshes` to `meshkeep` (2026-11-20). | `src-tauri/tauri.conf.json`, `README.md` |
-| Q16 | License | **MIT** (2026-10-18). | `LICENSE` |
+| Q16 | License | **PolyForm Noncommercial 1.0.0** since 2026-10-19: source-available for noncommercial use, the Store build ships under the copyright holder's own terms. Was: MIT (2026-10-18). | `LICENSE`, `NOTICE`, `CONTRIBUTING.md` |
 | Q17 | Agent tooling | Claude Code primary, Copilot secondary, both via `AGENTS.md`; npm stays (2026-10-18). | `AGENTS.md`, `CLAUDE.md`, `.github/copilot-instructions.md` |
 | Q18 | MVP definition | Three deliveries: walking skeleton, daily driver, Store-ready (2026-10-18). | `docs/backlog.md` Phase 1 |
 | Q20 | Drag-out to slicer | Nice to have, very low priority (2026-10-17). | `spec/03-features.md` IMP-6 |
