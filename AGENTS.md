@@ -118,8 +118,9 @@ Browser mode (`npm run dev`, Playwright) uses the mock backend, which synthesize
 - Rust: `rustfmt` defaults, clippy clean, `thiserror` enums, no `unwrap` outside tests
   except on mutex locks. Return typed errors; the shell maps them to `AppError { code }`.
 - TypeScript: strict, no `any`, named exports, components in PascalCase files, hooks in
-  `use*`. Types in `src/lib/types.ts` mirror the Rust structs field by field; the next
-  change that extends the command API switches this to generated types (`tauri-specta`).
+  `use*`. Types in `src/lib/types.ts` mirror the Rust structs field by field, by hand: a
+  change to a struct or a command updates both sides in the same commit. Generating them
+  from Rust is planned as a change of its own (#109), not as part of a feature.
 - Tooling: Claude Code is the primary agent, Copilot secondary; both follow this file.
   Package manager is npm (lockfile committed).
 - Commits: imperative subject, body explains why.
