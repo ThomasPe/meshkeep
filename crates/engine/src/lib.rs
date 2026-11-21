@@ -8,6 +8,7 @@
 //! - A missing root is reported as offline; its projects are never deleted from the index.
 
 pub mod ai;
+pub mod audit;
 pub mod collections;
 pub mod conventions;
 pub mod diagnostics;

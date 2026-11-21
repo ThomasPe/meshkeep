@@ -52,7 +52,8 @@ pub struct NetworkSettings {
 
 /// The local MCP server (ADR-0004): listens on 127.0.0.1 only, every request carries the
 /// token. Writes are a separate switch so an agent can be read-only. `import_dirs` are the
-/// only folders outside the library the agent may list and import from.
+/// only folders outside the library the agent may list and import from. `allow_ai` lets an
+/// agent ask for the app's own AI suggestion, which spends the user's key (#101).
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct McpSettings {
     #[serde(default)]
@@ -69,6 +70,9 @@ pub struct McpSettings {
     pub allow_deletes: bool,
     #[serde(default)]
     pub import_dirs: Vec<PathBuf>,
+    /// Agents may run the in-app AI metadata suggestion (ADR-0003 rules apply; needs a key).
+    #[serde(default)]
+    pub allow_ai: bool,
 }
 
 pub const DEFAULT_MCP_PORT: u16 = 7340;
@@ -85,6 +89,7 @@ impl Default for McpSettings {
             allow_writes: false,
             allow_deletes: false,
             import_dirs: Vec::new(),
+            allow_ai: false,
         }
     }
 }

@@ -95,6 +95,8 @@ export function createTauriBackend(): Backend {
     setMcpSettings: (settings) => invoke('set_mcp_settings', { settings }),
     regenerateMcpToken: () => invoke('regenerate_mcp_token'),
     mcpStatus: () => invoke('mcp_status'),
+    mcpAudit: (limit, offset) => invoke('mcp_audit', { limit, offset }),
+    clearMcpAudit: () => invoke('clear_mcp_audit'),
     getConventions: (rootId) => invoke('get_conventions', { rootId }),
     setConventions: (rootId, text) => invoke('set_conventions', { rootId, text }),
     starterConventions: () => invoke('starter_conventions'),

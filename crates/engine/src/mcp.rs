@@ -1,19 +1,24 @@
 //! The MCP server's brain (ADR-0004): JSON-RPC messages in, results out. Transport, token
 //! check and threading live in the shell; this module only knows the engine, so every tool
-//! is testable without a socket. Protocol: MCP 2025-06-18, tools and prompts, no resources,
-//! stateless (no session ids, no server-initiated messages).
+//! is testable without a socket. Protocol: MCP 2025-06-18, tools, prompts and resources,
+//! stateless (no session ids). The one thing the server sends on its own is progress for a
+//! long tool, and only to a request that asked for it with a progress token (#102).
 //!
 //! Tools come in two sets. Reading ones are always on. Writing ones (metadata, imports,
 //! renames, moves, favorites, collections) only exist while "allow writes" is on; a client
 //! that listed tools before the switch flipped gets a clear error, not a silent no-op.
 //! Deleting ones (files, projects, duplicates, always to the trash) need the third switch on
-//! top; every deleting or moving tool takes `dry_run`.
+//! top; every deleting or moving tool takes `dry_run`. `suggest_metadata` has a switch of
+//! its own: it is the one tool that makes the app itself call out (ADR-0003), with the
+//! user's key, and it never writes.
 
+use crate::audit::{AuditEntry, AuditProject};
 use crate::engine::{BatchUpdate, MoveFilesDest, PromoteItem, UpdateMetadata};
 use crate::error::EngineError;
 use crate::import::{ArchivePolicy, ImportAction, ImportProgress, ImportRequest, ImportRequestItem};
 use crate::lock::SharedEngine;
 use crate::model::{FileKind, ListQuery, MissingField, Project, SortKey};
+use crate::settings::McpSettings;
 use crate::Engine;
 use serde_json::{json, Map, Value};
 use std::path::{Path, PathBuf};
@@ -32,11 +37,132 @@ pub enum Change {
 }
 
 /// What one JSON-RPC message produced: a response (none for notifications) and the changes
-/// made on the way.
+/// made on the way. A message whose answer needs a slow call that does not touch the engine
+/// (the AI provider) comes back with `deferred` instead of a response: the shell releases
+/// the engine lock first and then calls `finish`.
 #[derive(Debug, Default)]
 pub struct Outcome {
     pub response: Option<Value>,
     pub changes: Vec<Change>,
+    pub deferred: Option<Deferred>,
+}
+
+impl Outcome {
+    /// Runs the deferred part, if any, and returns the complete outcome.
+    pub fn finish(mut self) -> Outcome {
+        if let Some(d) = self.deferred.take() {
+            self.response = Some((d.0)());
+        }
+        self
+    }
+}
+
+/// The rest of a request, to run without the engine: returns the JSON-RPC response.
+pub struct Deferred(Box<dyn FnOnce() -> Value + Send>);
+
+impl std::fmt::Debug for Deferred {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("Deferred")
+    }
+}
+
+/// Reads the user's AI key; the engine never stores it (ADR-0003), the shell keeps it in
+/// the OS credential store.
+pub type AiKey<'a> = &'a dyn Fn() -> std::result::Result<Option<String>, String>;
+
+/// What the shell lends the protocol while one message runs.
+#[derive(Default)]
+pub struct Session<'a> {
+    /// Without it `suggest_metadata` answers "no key", as if none were stored.
+    pub ai_key: Option<AiKey<'a>>,
+    /// Delivers a notification to the client while its request is still running. Without it
+    /// long tools run silently, as they do for a client that sent no progress token.
+    pub notify: Option<&'a mut dyn FnMut(Value)>,
+    /// Shows an import an agent started in the window, like the window's own import does.
+    /// Only `handle_shared` reports to it.
+    pub import_progress: Option<&'a mut dyn FnMut(ImportProgress)>,
+}
+
+/// Whether a message asks for progress: a single `tools/call` carrying
+/// `params._meta.progressToken`. The shell opens a stream for the answer only then.
+pub fn wants_progress(message: &Value) -> bool {
+    message.get("method").and_then(|m| m.as_str()) == Some("tools/call") && progress_token(message.get("params")).is_some()
+}
+
+fn progress_token(params: Option<&Value>) -> Option<Value> {
+    params?
+        .get("_meta")?
+        .get("progressToken")
+        .filter(|t| t.is_string() || t.is_number())
+        .cloned()
+}
+
+/// Sends `notifications/progress` for one request (#102): only when the client sent a token
+/// and the shell can deliver, never backwards, and not more often than a client can use.
+struct Progress<'a, 'b> {
+    token: Option<Value>,
+    notify: Option<&'a mut (dyn FnMut(Value) + 'b)>,
+    sent_at: Option<std::time::Instant>,
+    sent: f64,
+}
+
+const PROGRESS_EVERY: std::time::Duration = std::time::Duration::from_millis(250);
+
+impl<'a, 'b> Progress<'a, 'b> {
+    fn new(token: Option<Value>, notify: Option<&'a mut (dyn FnMut(Value) + 'b)>) -> Progress<'a, 'b> {
+        Progress {
+            token,
+            notify,
+            sent_at: None,
+            sent: f64::NEG_INFINITY,
+        }
+    }
+
+    fn report(&mut self, progress: f64, total: Option<f64>, message: impl FnOnce() -> String) {
+        let (Some(token), Some(notify)) = (&self.token, self.notify.as_mut()) else {
+            return;
+        };
+        // the protocol wants the value to rise with every notification
+        if progress <= self.sent {
+            return;
+        }
+        let finished = total.is_some_and(|t| progress >= t);
+        if !finished && self.sent_at.is_some_and(|t| t.elapsed() < PROGRESS_EVERY) {
+            return;
+        }
+        let mut params = json!({ "progressToken": token, "progress": progress, "message": message() });
+        if let Some(t) = total {
+            params["total"] = json!(t);
+        }
+        notify(json!({ "jsonrpc": "2.0", "method": "notifications/progress", "params": params }));
+        self.sent_at = Some(std::time::Instant::now());
+        self.sent = progress;
+    }
+
+    /// An import, in items: once for copying and, when metadata follows, once more for that.
+    fn importing(&mut self, req: &ImportRequest, p: &ImportProgress) {
+        let items = req.items.len() as f64;
+        let total = if req.apply_hints || req.fetch_pages { items * 2.0 } else { items };
+        let done = if p.total == 0 {
+            0.0
+        } else {
+            f64::from(p.index) / f64::from(p.total)
+        };
+        let (at, verb) = match p.phase.as_str() {
+            "metadata" => (items + done * items, "Reading metadata for"),
+            _ => (done * items, "Importing"),
+        };
+        self.report(at, Some(total), || format!("{verb} {} ({} of {})", p.name, p.index + 1, p.total));
+    }
+
+    /// The hashing step of duplicate detection, in files.
+    fn hashing(&mut self, p: crate::engine::HashProgress) {
+        if p.total > 0 {
+            self.report(p.done as f64, Some(p.total as f64), || {
+                format!("Hashing model files: {} of {}", p.done, p.total)
+            });
+        }
+    }
 }
 
 /// The server's self-description for `initialize`.
@@ -52,11 +178,19 @@ look at the folders the user opened for imports (downloads); execute_import crea
 hint, a readme or a model page; leave a field alone rather than guess. Deleting tools, when the user allows them, only move to the trash; \
 use dry_run first and tell the user what went. A packed project (`packed` in get_project) keeps its models inside a zip in its folder: its files \
 are listed as `<archive>/<path>` and can be read, but not moved or deleted one by one; unpack_projects extracts them, pack_projects packs loose \
-models, and execute_import with action `packed` adds a zip download without extracting it (smaller on disk, far fewer files to sync).";
+models, and execute_import with action `packed` adds a zip download without extracting it (smaller on disk, far fewer files to sync). \
+Every project is also a resource (meshkeep://project/{id}, listed by resources/list): the same JSON as get_project, with its text files and its \
+preview picture below it.";
+
+/// Handles one message or a batch with nothing lent by a shell: what tests and simple hosts
+/// use. See `handle_with`.
+pub fn handle(engine: &mut Engine, message: &Value) -> Outcome {
+    handle_with(engine, message, &mut Session::default())
+}
 
 /// Handles one message or a batch. Batches get a batch back; a batch of notifications gets
 /// no response at all.
-pub fn handle(engine: &mut Engine, message: &Value) -> Outcome {
+pub fn handle_with(engine: &mut Engine, message: &Value, session: &mut Session) -> Outcome {
     match message {
         Value::Array(items) => {
             let mut out = Outcome::default();
@@ -66,7 +200,8 @@ pub fn handle(engine: &mut Engine, message: &Value) -> Outcome {
                 return out;
             }
             for item in items {
-                let one = handle_one(engine, item);
+                // inside a batch the slow part runs in place: the answers have to stay in order
+                let one = handle_one(engine, item, session).finish();
                 if let Some(r) = one.response {
                     responses.push(r);
                 }
@@ -77,16 +212,16 @@ pub fn handle(engine: &mut Engine, message: &Value) -> Outcome {
             }
             out
         }
-        other => handle_one(engine, other),
+        other => handle_one(engine, other, session),
     }
 }
 
-fn handle_one(engine: &mut Engine, message: &Value) -> Outcome {
+fn handle_one(engine: &mut Engine, message: &Value, session: &mut Session) -> Outcome {
     let id = message.get("id").cloned().filter(|v| !v.is_null());
     let Some(method) = message.get("method").and_then(|m| m.as_str()) else {
         return Outcome {
             response: Some(error_response(id.unwrap_or(Value::Null), -32600, "not a request: no method")),
-            changes: Vec::new(),
+            ..Default::default()
         };
     };
     let params = message.get("params").cloned().unwrap_or(Value::Null);
@@ -109,53 +244,78 @@ fn handle_one(engine: &mut Engine, message: &Value) -> Outcome {
             };
             Ok(json!({
                 "protocolVersion": PROTOCOL_VERSION,
-                "capabilities": { "tools": { "listChanged": false }, "prompts": { "listChanged": false } },
+                "capabilities": {
+                    "tools": { "listChanged": false },
+                    "prompts": { "listChanged": false },
+                    "resources": { "subscribe": false, "listChanged": false },
+                },
                 "serverInfo": server_info(),
                 "instructions": instructions,
             }))
         }
         "ping" => Ok(json!({})),
-        "tools/list" => {
-            let s = engine.mcp_settings();
-            Ok(json!({ "tools": tools(s.allow_writes, s.allow_writes && s.allow_deletes) }))
-        }
+        "tools/list" => Ok(json!({ "tools": tools(&engine.mcp_settings()) })),
         "tools/call" => {
             let (name, args) = tool_call_params(&params);
             let started = Instant::now();
-            let result = call_tool(engine, name, &args, &mut changes);
+            let result = if name == "suggest_metadata" {
+                match prepare_suggestion(engine, &args, session) {
+                    Ok(job) => {
+                        let name = name.to_string();
+                        return Outcome {
+                            deferred: Some(Deferred(Box::new(move || {
+                                let result = job();
+                                log_tool_call(&name, started, &result, 0);
+                                tool_response(id, result)
+                            }))),
+                            ..Default::default()
+                        };
+                    }
+                    Err(e) => Err(e),
+                }
+            } else {
+                let notify = session.notify.as_deref_mut();
+                let mut progress = Progress::new(progress_token(Some(&params)), notify);
+                // the journal names projects as they were before the call: ids change with a
+                // rename or a move, and a deleted project has no title afterwards
+                let writes = is_write_tool(name);
+                let named = if writes { projects_named(engine, &args) } else { Vec::new() };
+                let result = call_tool(engine, name, &args, &mut changes, &mut progress);
+                if let (Ok(v), true, false) = (&result, writes, changes.is_empty()) {
+                    record_change(engine, name, &args, named, v);
+                }
+                result
+            };
             log_tool_call(name, started, &result, changes.len());
             return tool_call_outcome(id, result, changes);
         }
         "prompts/list" => Ok(json!({ "prompts": prompts() })),
-        "prompts/get" => prompt(params.get("name").and_then(|n| n.as_str()).unwrap_or(""), params.get("arguments")),
-        "resources/list" => Ok(json!({ "resources": [] })),
-        "resources/templates/list" => Ok(json!({ "resourceTemplates": [] })),
-        _ => Err(format!("method not found: {method}")),
+        "prompts/get" => prompt(params.get("name").and_then(|n| n.as_str()).unwrap_or(""), params.get("arguments")).map_err(RpcError::from),
+        "resources/list" => list_resources(engine, params.get("cursor")),
+        "resources/templates/list" => Ok(json!({ "resourceTemplates": resource_templates() })),
+        "resources/read" => read_resource(engine, params.get("uri").and_then(|u| u.as_str()).unwrap_or("")),
+        _ => Err(RpcError::from(format!("method not found: {method}"))),
     };
     let response = match result {
         Ok(result) => json!({ "jsonrpc": "2.0", "id": id, "result": result }),
-        Err(msg) => error_response(id, -32601, &msg),
+        Err(e) => {
+            let mut r = error_response(id, e.code, &e.message);
+            if let Some(data) = e.data {
+                r["error"]["data"] = data;
+            }
+            r
+        }
     };
     Outcome {
         response: Some(response),
         changes,
+        deferred: None,
     }
 }
 
-fn error_response(id: Value, code: i64, message: &str) -> Value {
-    json!({ "jsonrpc": "2.0", "id": id, "error": { "code": code, "message": message } })
-}
-
-fn tool_call_params(params: &Value) -> (&str, Value) {
-    (
-        params.get("name").and_then(|n| n.as_str()).unwrap_or(""),
-        params.get("arguments").cloned().unwrap_or_else(|| json!({})),
-    )
-}
-
-/// The JSON-RPC answer to a `tools/call`: a tool result (possibly `isError`) or, for a name
-/// the server does not know, a protocol error.
-fn tool_call_outcome(id: Value, result: ToolResult, changes: Vec<Change>) -> Outcome {
+/// The JSON-RPC answer to `tools/call`: a failed tool is a result with `isError`, an
+/// unknown tool a protocol error.
+fn tool_response(id: Value, result: ToolResult) -> Value {
     let result = match result {
         Ok(v) => {
             // the spec wants an object here; clients reject a bare array
@@ -166,17 +326,63 @@ fn tool_call_outcome(id: Value, result: ToolResult, changes: Vec<Change>) -> Out
                 "isError": false,
             })
         }
-        Err(ToolError::Unknown(n)) => {
-            return Outcome {
-                response: Some(error_response(id, -32602, &format!("unknown tool: {n}"))),
-                changes,
-            }
-        }
+        Err(ToolError::Unknown(n)) => return error_response(id, -32602, &format!("unknown tool: {n}")),
         Err(ToolError::Failed(msg)) => json!({ "content": [{ "type": "text", "text": msg }], "isError": true }),
     };
+    json!({ "jsonrpc": "2.0", "id": id, "result": result })
+}
+
+fn error_response(id: Value, code: i64, message: &str) -> Value {
+    json!({ "jsonrpc": "2.0", "id": id, "error": { "code": code, "message": message } })
+}
+
+/// A protocol-level failure (as opposed to a tool that ran and failed).
+struct RpcError {
+    code: i64,
+    message: String,
+    data: Option<Value>,
+}
+
+impl RpcError {
+    fn invalid_params(message: impl Into<String>) -> RpcError {
+        RpcError {
+            code: -32602,
+            message: message.into(),
+            data: None,
+        }
+    }
+    /// MCP's own code for a resource that does not exist.
+    fn resource_not_found(uri: &str) -> RpcError {
+        RpcError {
+            code: -32002,
+            message: format!("resource not found: {uri}"),
+            data: Some(json!({ "uri": uri })),
+        }
+    }
+}
+
+impl From<String> for RpcError {
+    fn from(message: String) -> Self {
+        RpcError {
+            code: -32601,
+            message,
+            data: None,
+        }
+    }
+}
+
+fn tool_call_params(params: &Value) -> (&str, Value) {
+    (
+        params.get("name").and_then(|n| n.as_str()).unwrap_or(""),
+        params.get("arguments").cloned().unwrap_or_else(|| json!({})),
+    )
+}
+
+fn tool_call_outcome(id: Value, result: ToolResult, changes: Vec<Change>) -> Outcome {
     Outcome {
-        response: Some(json!({ "jsonrpc": "2.0", "id": id, "result": result })),
+        response: Some(tool_response(id, result)),
         changes,
+        deferred: None,
     }
 }
 
@@ -222,11 +428,12 @@ fn is_write_tool(name: &str) -> bool {
         )
 }
 
-/// What the shell calls: the same as [`handle`] over a shared engine, except that
+/// What the shell calls: the same as [`handle_with`] over a shared engine, except that
 /// `execute_import` holds the lock only to plan and to finish. Unpacking and copying, the
 /// slow part of a big import, runs while the window's commands can still get at the engine.
-/// `progress` receives the import's progress like the window's own import does.
-pub fn handle_shared(engine: &SharedEngine, message: &Value, progress: &mut dyn FnMut(ImportProgress)) -> Outcome {
+/// An answer that comes back `deferred` is finished by the caller, after this returned and
+/// with it the lock.
+pub fn handle_shared(engine: &SharedEngine, message: &Value, session: &mut Session) -> Outcome {
     let import_call = message
         .get("method")
         .and_then(|m| m.as_str())
@@ -235,13 +442,25 @@ pub fn handle_shared(engine: &SharedEngine, message: &Value, progress: &mut dyn 
         .filter(|_| message.get("params").and_then(|p| p.get("name")).and_then(|n| n.as_str()) == Some("execute_import"));
     let Some(id) = import_call else {
         let mut engine = engine.lock().unwrap_or_else(|e| e.into_inner());
-        return handle(&mut engine, message);
+        return handle_with(&mut engine, message, session);
     };
     let params = message.get("params").cloned().unwrap_or(Value::Null);
     let (name, args) = tool_call_params(&params);
     let started = Instant::now();
     let mut changes = Vec::new();
-    let result = execute_import_shared(engine, &args, &mut changes, progress);
+    // the client that asked hears about it (#102), and so does the window
+    let mut progress = Progress::new(progress_token(Some(&params)), session.notify.as_deref_mut());
+    let window = &mut session.import_progress;
+    let mut to_window = |p: ImportProgress| {
+        if let Some(show) = window.as_mut() {
+            show(p)
+        }
+    };
+    let result = execute_import_shared(engine, &args, &mut changes, &mut progress, &mut to_window);
+    if let (Ok(v), false) = (&result, changes.is_empty()) {
+        let engine = engine.lock().unwrap_or_else(|e| e.into_inner());
+        record_change(&engine, name, &args, Vec::new(), v);
+    }
     log_tool_call(name, started, &result, changes.len());
     tool_call_outcome(id, result, changes)
 }
@@ -250,7 +469,8 @@ fn execute_import_shared(
     engine: &SharedEngine,
     args: &Value,
     changes: &mut Vec<Change>,
-    progress: &mut dyn FnMut(ImportProgress),
+    progress: &mut Progress,
+    to_window: &mut dyn FnMut(ImportProgress),
 ) -> ToolResult {
     let (req, plan) = {
         let engine = engine.lock().unwrap_or_else(|e| e.into_inner());
@@ -259,11 +479,15 @@ fn execute_import_shared(
         let plan = engine.plan_import(&req)?;
         (req, plan)
     };
+    let mut step = |p: ImportProgress| {
+        progress.importing(&req, &p);
+        to_window(p);
+    };
     // no lock held: the window keeps answering while files move
-    let report = plan.run(&req, &mut *progress)?;
+    let report = plan.run(&req, &mut step)?;
     let report = {
         let mut engine = engine.lock().unwrap_or_else(|e| e.into_inner());
-        engine.finish_import(&req, report, &mut *progress)?
+        engine.finish_import(&req, report, &mut step)?
     };
     changes.push(Change::Library {
         root_id: Some(req.root_id.clone()),
@@ -341,7 +565,9 @@ fn tool(name: &str, desc: &str, input: Value, read_only: bool, destructive: bool
 }
 
 /// The tools a client may call right now.
-pub fn tools(allow_writes: bool, allow_deletes: bool) -> Vec<Value> {
+pub fn tools(settings: &McpSettings) -> Vec<Value> {
+    let allow_writes = settings.allow_writes;
+    let allow_deletes = allow_writes && settings.allow_deletes;
     let mut t = vec![
         tool("list_roots", "The library folders Meshkeep manages, with their ids and last scan.", schema(&[], &[]), true, false),
         tool("library_stats", "Project count, total size and favorites.", schema(&[], &[]), true, false),
@@ -440,6 +666,17 @@ pub fn tools(allow_writes: bool, allow_deletes: bool) -> Vec<Value> {
             false,
         ),
     ];
+    if settings.allow_ai {
+        let mut ai = tool(
+            "suggest_metadata",
+            "Ask Meshkeep's own AI assistant what a project is: it looks at the project's preview picture, its file names, readme and license text and the metadata already there, and proposes title, creator, license, description and tags. For an agent that cannot see the preview itself. Uses the AI provider and key the user set up in Settings (one request per project; an answer is cached until the project changes) and sends those inputs there, never model geometry. Nothing is written: check the proposal and write what holds with update_metadata.",
+            schema(&[("project_id", s("Project id"))], &["project_id"]),
+            true,
+            false,
+        );
+        ai["annotations"]["openWorldHint"] = json!(true);
+        t.push(ai);
+    }
     if allow_writes {
         t.extend([
             tool(
@@ -675,6 +912,227 @@ Work project by project:\n\
     )
 }
 
+// ---- resources (#100) -------------------------------------------------------------------
+//
+// For clients that browse instead of calling tools: every project is a resource, its text
+// files and its preview hang below it. Reading only, so nothing beyond the token applies.
+//
+//   meshkeep://project/{id}                 the project as JSON (what get_project returns)
+//   meshkeep://project/{id}/file/{+path}    a text file of the project (what read_project_file reads)
+//   meshkeep://project/{id}/thumbnail       the cached preview picture, PNG
+//
+// The id is one path segment: `:` and `/` inside it are percent-encoded.
+
+const PROJECT_URI: &str = "meshkeep://project/";
+const RESOURCE_PAGE: u32 = 100;
+
+/// Percent-encodes everything outside RFC 3986's unreserved set; `keep_slash` leaves the
+/// separators of a relative path alone.
+fn uri_encode(s: &str, keep_slash: bool) -> String {
+    let mut out = String::with_capacity(s.len());
+    for b in s.bytes() {
+        if b.is_ascii_alphanumeric() || matches!(b, b'-' | b'.' | b'_' | b'~') || (keep_slash && b == b'/') {
+            out.push(b as char);
+        } else {
+            out.push_str(&format!("%{b:02X}"));
+        }
+    }
+    out
+}
+
+fn uri_decode(s: &str) -> Option<String> {
+    let bytes = s.as_bytes();
+    let mut out = Vec::with_capacity(bytes.len());
+    let mut i = 0;
+    while i < bytes.len() {
+        if bytes[i] == b'%' {
+            let hex = s.get(i + 1..i + 3)?;
+            out.push(u8::from_str_radix(hex, 16).ok()?);
+            i += 3;
+        } else {
+            out.push(bytes[i]);
+            i += 1;
+        }
+    }
+    String::from_utf8(out).ok()
+}
+
+/// The resource URI of a project.
+pub fn project_uri(id: &str) -> String {
+    format!("{PROJECT_URI}{}", uri_encode(id, false))
+}
+
+fn file_uri(id: &str, rel: &str) -> String {
+    format!("{}/file/{}", project_uri(id), uri_encode(rel, true))
+}
+
+fn thumbnail_uri(id: &str) -> String {
+    format!("{}/thumbnail", project_uri(id))
+}
+
+fn resource_templates() -> Vec<Value> {
+    vec![
+        json!({
+            "uriTemplate": "meshkeep://project/{id}",
+            "name": "project",
+            "title": "Project",
+            "description": "One project as JSON: metadata, files, the folder path, hints and the model page link. The id comes from search_projects or resources/list.",
+            "mimeType": "application/json",
+        }),
+        json!({
+            "uriTemplate": "meshkeep://project/{id}/file/{+path}",
+            "name": "project-file",
+            "title": "Project file",
+            "description": "A text file inside a project (readme, license note, .url shortcut), up to 256 KiB. The path is relative to the project folder.",
+        }),
+        json!({
+            "uriTemplate": "meshkeep://project/{id}/thumbnail",
+            "name": "project-thumbnail",
+            "title": "Project preview",
+            "description": "The project's preview picture as the app shows it, when one has been rendered.",
+            "mimeType": "image/png",
+        }),
+    ]
+}
+
+/// One page of projects, by title. The cursor is the offset of the next page.
+fn list_resources(engine: &Engine, cursor: Option<&Value>) -> std::result::Result<Value, RpcError> {
+    let offset = match cursor {
+        None | Some(Value::Null) => 0,
+        Some(c) => c
+            .as_str()
+            .and_then(|c| c.parse::<u32>().ok())
+            .ok_or_else(|| RpcError::invalid_params("invalid cursor"))?,
+    };
+    let q = ListQuery {
+        sort: SortKey::Title,
+        limit: Some(RESOURCE_PAGE),
+        offset: Some(offset),
+        ..Default::default()
+    };
+    let items = engine.list_projects(&q).map_err(|e| RpcError {
+        code: -32603,
+        message: e.to_string(),
+        data: None,
+    })?;
+    let mut out = json!({
+        "resources": items.iter().map(|p| {
+            let mut about = Vec::new();
+            if let Some(c) = p.creator.as_deref().filter(|c| !c.is_empty()) {
+                about.push(format!("by {c}"));
+            }
+            about.push(format!("{} model file{}", p.model_count, if p.model_count == 1 { "" } else { "s" }));
+            if !p.tags.is_empty() {
+                about.push(p.tags.join(", "));
+            }
+            json!({
+                "uri": project_uri(&p.id),
+                "name": if p.rel_path.is_empty() { p.title.as_str() } else { p.rel_path.as_str() },
+                "title": p.title,
+                "description": about.join(" · "),
+                "mimeType": "application/json",
+            })
+        }).collect::<Vec<_>>(),
+    });
+    if items.len() as u32 == RESOURCE_PAGE {
+        out["nextCursor"] = json!((offset + RESOURCE_PAGE).to_string());
+    }
+    Ok(out)
+}
+
+enum ProjectPart {
+    Details,
+    File(String),
+    Thumbnail,
+}
+
+/// Splits a resource URI into the project id and what is asked of it. A client that did
+/// not encode the id (`meshkeep://project/<root>:<folder>/<sub>`) is understood too, as long
+/// as that names a project.
+fn parse_project_uri(engine: &Engine, uri: &str) -> Option<(Project, ProjectPart)> {
+    let rest = uri.strip_prefix(PROJECT_URI)?;
+    let (id, tail) = match rest.split_once('/') {
+        Some((id, tail)) => (id, Some(tail)),
+        None => (rest, None),
+    };
+    let part = match tail {
+        None | Some("") => Some(ProjectPart::Details),
+        Some("thumbnail") => Some(ProjectPart::Thumbnail),
+        Some(t) => t
+            .strip_prefix("file/")
+            .and_then(uri_decode)
+            .filter(|rel| !rel.is_empty())
+            .map(ProjectPart::File),
+    };
+    if let (Some(part), Some(p)) = (part, uri_decode(id).and_then(|id| engine.get_project(&id).ok())) {
+        return Some((p, part));
+    }
+    let p = engine.get_project(&uri_decode(rest)?).ok()?;
+    Some((p, ProjectPart::Details))
+}
+
+/// Files worth offering to a browsing client as text: small, and named like text.
+fn looks_textual(rel: &str, size: u64) -> bool {
+    let name = rel.rsplit('/').next().unwrap_or(rel).to_ascii_lowercase();
+    let textual = match name.rsplit_once('.') {
+        Some((_, ext)) => matches!(
+            ext,
+            "txt" | "md" | "markdown" | "url" | "readme" | "json" | "yaml" | "yml" | "html" | "htm" | "csv" | "ini" | "cfg"
+        ),
+        None => matches!(name.as_str(), "readme" | "license" | "licence" | "copying" | "notes"),
+    };
+    textual && size <= MAX_TEXT_BYTES
+}
+
+fn text_mime(rel: &str) -> &'static str {
+    match rel.rsplit('.').next().unwrap_or("").to_ascii_lowercase().as_str() {
+        "md" | "markdown" => "text/markdown",
+        "json" => "application/json",
+        "yaml" | "yml" => "application/yaml",
+        "html" | "htm" => "text/html",
+        _ => "text/plain",
+    }
+}
+
+fn read_resource(engine: &Engine, uri: &str) -> std::result::Result<Value, RpcError> {
+    use base64::Engine as _;
+    let (p, part) = parse_project_uri(engine, uri).ok_or_else(|| RpcError::resource_not_found(uri))?;
+    let content = match part {
+        ProjectPart::Details => {
+            let mut v = project_details(engine, &p);
+            // where a browsing client goes next
+            v["thumbnail_uri"] = json!(p.thumb.as_ref().map(|_| thumbnail_uri(&p.id)));
+            if let Some(files) = v["files"].as_array_mut() {
+                for (f, entry) in files.iter_mut().zip(&p.files) {
+                    if looks_textual(&entry.rel_path, entry.size) {
+                        f["uri"] = json!(file_uri(&p.id, &entry.rel_path));
+                    }
+                }
+            }
+            json!({ "uri": uri, "mimeType": "application/json", "text": serde_json::to_string_pretty(&v).unwrap_or_default() })
+        }
+        ProjectPart::File(rel) => {
+            if !p.files.iter().any(|f| f.rel_path == rel) {
+                return Err(RpcError::resource_not_found(uri));
+            }
+            let text = project_file_text(engine, &p.id, &rel).map_err(|e| match e {
+                ToolError::Failed(m) | ToolError::Unknown(m) => RpcError::invalid_params(m),
+            })?;
+            json!({ "uri": uri, "mimeType": text_mime(&rel), "text": text })
+        }
+        ProjectPart::Thumbnail => {
+            let png = p
+                .thumb
+                .as_deref()
+                .and_then(|key| engine.thumbnail_path(key).ok())
+                .and_then(|path| std::fs::read(path).ok())
+                .ok_or_else(|| RpcError::resource_not_found(uri))?;
+            json!({ "uri": uri, "mimeType": "image/png", "blob": base64::engine::general_purpose::STANDARD.encode(png) })
+        }
+    };
+    Ok(json!({ "contents": [content] }))
+}
+
 // ---- argument helpers -------------------------------------------------------------------
 
 fn arg_str(args: &Value, key: &str) -> Option<String> {
@@ -732,9 +1190,122 @@ fn import_request(engine: &Engine, args: &Value) -> std::result::Result<ImportRe
     Ok(req)
 }
 
+// ---- the in-app AI suggestion (#101) --------------------------------------------------------
+
+type SuggestionJob = Box<dyn FnOnce() -> ToolResult + Send>;
+
+/// Everything `suggest_metadata` needs from the engine, gathered under its lock; the
+/// returned job makes the provider call and needs the engine no more. The rules of ADR-0003
+/// hold on this path as in the window: no key, no request; only the documented inputs
+/// leave; the answer is validated and never written.
+fn prepare_suggestion(engine: &Engine, args: &Value, session: &Session) -> std::result::Result<SuggestionJob, ToolError> {
+    if !engine.mcp_settings().allow_ai {
+        return Err(ToolError::Failed(
+            "suggest_metadata is not available: AI suggestions for agents are off. The user can allow them in Settings → MCP server."
+                .into(),
+        ));
+    }
+    let id = need_str(args, "project_id")?;
+    let key = match session.ai_key {
+        Some(read) => read().map_err(|e| ToolError::Failed(format!("the AI key could not be read: {e}")))?,
+        None => None,
+    };
+    let provider = engine.ai_provider(key.as_deref()).map_err(|e| match e {
+        EngineError::AiDisabled => {
+            ToolError::Failed("AI assistance is not set up: the user can store an API key in Settings → AI assistance.".into())
+        }
+        other => other.into(),
+    })?;
+    let prepared = engine.ai_prepare_suggestion(&id)?;
+    Ok(Box::new(move || {
+        let suggestion = crate::ai::run_suggestion(prepared, provider.as_ref())?;
+        let mut v = serde_json::to_value(&suggestion).map_err(|e| e.to_string())?;
+        v["project_id"] = json!(id);
+        v["note"] =
+            json!("A proposal, nothing was written. Keep what the files or a model page back up and write it with update_metadata.");
+        Ok(v)
+    }))
+}
+
 // ---- tools --------------------------------------------------------------------------------
 
-fn call_tool(engine: &mut Engine, name: &str, args: &Value, changes: &mut Vec<Change>) -> ToolResult {
+// ---- the journal of what agents changed (#103) ----------------------------------------------
+
+fn last_segment(rel: &str) -> &str {
+    rel.rsplit('/').next().filter(|s| !s.is_empty()).unwrap_or(rel)
+}
+
+/// The projects a call names in its arguments, with the titles they have right now.
+fn projects_named(engine: &Engine, args: &Value) -> Vec<AuditProject> {
+    let mut ids: Vec<String> = ["project_id", "keep_project_id"].iter().filter_map(|k| arg_str(args, k)).collect();
+    ids.extend(arg_strings(args, "project_ids").unwrap_or_default());
+    ids.into_iter()
+        .filter_map(|id| engine.get_project(&id).ok())
+        .map(|p| AuditProject { id: p.id, title: p.title })
+        .collect()
+}
+
+/// The projects a result names on top: the ones a tool created, moved to or took away.
+fn projects_in_result(args: &Value, v: &Value) -> Vec<AuditProject> {
+    let mut out = Vec::new();
+    let mut push = |id: Option<&str>, title: Option<&str>| {
+        if let (Some(id), Some(title)) = (id, title) {
+            out.push(AuditProject {
+                id: id.to_string(),
+                title: title.to_string(),
+            });
+        }
+    };
+    // a tool that answers with the project itself
+    push(v.get("id").and_then(|i| i.as_str()), v.get("title").and_then(|t| t.as_str()));
+    // an import lists the folders it created, relative to the root
+    if let (Some(root), Some(rels)) = (
+        args.get("root_id").and_then(|r| r.as_str()),
+        v.get("projects").and_then(|p| p.as_array()),
+    ) {
+        for rel in rels.iter().filter_map(|r| r.as_str()) {
+            push(Some(&Project::make_id(root, rel)), Some(last_segment(rel)));
+        }
+    }
+    for key in ["created", "moved", "trashed", "applied", "projects"] {
+        for row in v.get(key).and_then(|r| r.as_array()).into_iter().flatten() {
+            let id = row.get("id").or_else(|| row.get("project_id")).and_then(|i| i.as_str());
+            let title = row
+                .get("title")
+                .and_then(|t| t.as_str())
+                .or_else(|| row.get("rel_path").and_then(|r| r.as_str()).map(last_segment));
+            push(id, title);
+        }
+    }
+    if let Some(dest) = v.get("dest").filter(|d| d.is_object()) {
+        push(
+            dest.get("id").and_then(|i| i.as_str()),
+            dest.get("rel_path").and_then(|r| r.as_str()).map(last_segment),
+        );
+    }
+    out
+}
+
+/// Writes one line into the journal. A journal that cannot be written does not undo or fail
+/// the change it would have recorded; it is logged.
+fn record_change(engine: &Engine, tool: &str, args: &Value, mut projects: Vec<AuditProject>, result: &Value) {
+    if matches!(tool, "rename_project" | "move_projects") {
+        // these give projects a new id: the result names them as they can be found now
+        projects.clear();
+    }
+    projects.extend(projects_in_result(args, result));
+    let failed = ["failed", "errors"]
+        .iter()
+        .filter_map(|k| result.get(k).and_then(|f| f.as_array()))
+        .map(|a| a.len() as u32)
+        .sum();
+    let entry = AuditEntry::new(tool, args, projects, failed);
+    if let Err(e) = crate::audit::append(engine.data_dir(), &entry) {
+        tracing::warn!("MCP journal: {e}");
+    }
+}
+
+fn call_tool(engine: &mut Engine, name: &str, args: &Value, changes: &mut Vec<Change>, progress: &mut Progress) -> ToolResult {
     write_gate(engine, name)?;
     let dry_run = arg_bool(args, "dry_run").unwrap_or(false);
     match name {
@@ -798,39 +1369,13 @@ fn call_tool(engine: &mut Engine, name: &str, args: &Value, changes: &mut Vec<Ch
         "get_project" => {
             let id = need_str(args, "project_id")?;
             let p = engine.get_project(&id)?;
-            let mut v = project_view(engine, &p);
-            if let Ok(h) = engine.project_hints(&id) {
-                v["hints"] = json!({
-                    "creator": h.creator.iter().map(hint_view).collect::<Vec<_>>(),
-                    "license": h.license.iter().map(hint_view).collect::<Vec<_>>(),
-                    "source_url": h.source_url.iter().map(hint_view).collect::<Vec<_>>(),
-                });
-            }
-            v["model_page_url"] = json!(engine.model_page_url(&id).ok().flatten());
-            Ok(v)
+            Ok(project_details(engine, &p))
         }
         "read_project_file" => {
             let id = need_str(args, "project_id")?;
             let rel = need_str(args, "rel_path")?;
-            let located = engine.locate(&id, &rel)?;
-            let size = match &located {
-                crate::packed::Located::Disk(path) => std::fs::metadata(path).map_err(|e| e.to_string())?.len(),
-                crate::packed::Located::Packed { .. } => engine
-                    .get_project(&id)?
-                    .files
-                    .iter()
-                    .find(|f| f.rel_path == rel)
-                    .map(|f| f.size)
-                    .ok_or_else(|| ToolError::Failed(format!("{rel} is not in the packed archive")))?,
-            };
-            if size > MAX_TEXT_BYTES {
-                return Err(format!("{rel} is {size} bytes; only text files up to {MAX_TEXT_BYTES} bytes are read").into());
-            }
-            let bytes = located.read()?;
-            if bytes.iter().take(4096).filter(|b| **b == 0).count() > 0 {
-                return Err(format!("{rel} is not a text file").into());
-            }
-            Ok(json!({ "rel_path": rel, "text": String::from_utf8_lossy(&bytes) }))
+            let text = project_file_text(engine, &id, &rel)?;
+            Ok(json!({ "rel_path": rel, "text": text }))
         }
         "fetch_model_page" => {
             let s = match (arg_str(args, "project_id"), arg_str(args, "url")) {
@@ -866,7 +1411,7 @@ fn call_tool(engine: &mut Engine, name: &str, args: &Value, changes: &mut Vec<Ch
             Ok(json!({ "items": engine.analyze_import(&checked) }))
         }
         "find_duplicates" => {
-            let r = engine.find_duplicates(|_| {})?;
+            let r = engine.find_duplicates(|p| progress.hashing(p))?;
             Ok(json!({
                 "candidates": r.candidates, "hashed": r.hashed,
                 "groups": r.groups.iter().map(|g| json!({
@@ -925,10 +1470,28 @@ fn call_tool(engine: &mut Engine, name: &str, args: &Value, changes: &mut Vec<Ch
                 }
                 return Ok(json!({ "dry_run": true, "projects": rows }));
             }
+            // progress in projects: the files of the one in work are its fraction
+            let total = ids.len() as f64;
+            let mut on_step = |p: crate::engine::PackProgress| {
+                let at = ids.iter().position(|id| *id == p.project_id).unwrap_or(0);
+                let files = if p.total == 0 {
+                    0.0
+                } else {
+                    f64::from(p.index) / f64::from(p.total)
+                };
+                let (share, verb) = match p.phase.as_str() {
+                    "pack" => (files * 0.8, "Packing"),
+                    "verify" => (0.8, "Verifying"),
+                    _ => (files, "Unpacking"),
+                };
+                progress.report(at as f64 + share.min(0.99), Some(total), || {
+                    format!("{verb} project {} of {}: {}", at + 1, ids.len(), p.name)
+                });
+            };
             let r = if packing {
-                engine.pack_projects(&ids, |_| {})
+                engine.pack_projects(&ids, &mut on_step)
             } else {
-                engine.unpack_projects(&ids, arg_bool(args, "keep_archive").unwrap_or(false), |_| {})
+                engine.unpack_projects(&ids, arg_bool(args, "keep_archive").unwrap_or(false), &mut on_step)
             };
             if !r.projects.is_empty() {
                 changes.push(Change::Library {
@@ -954,7 +1517,11 @@ fn call_tool(engine: &mut Engine, name: &str, args: &Value, changes: &mut Vec<Ch
         }
         "scan_root" => {
             let root = need_str(args, "root_id")?;
-            let r = engine.scan_root_as(&root, "mcp", |_| {})?;
+            let r = engine.scan_root_as(&root, "mcp", |p| {
+                progress.report(f64::from(p.projects_found), None, || {
+                    format!("Scanning: {} projects found", p.projects_found)
+                })
+            })?;
             changes.push(Change::Library {
                 root_id: Some(root),
                 reason: "scan".into(),
@@ -1018,7 +1585,7 @@ fn call_tool(engine: &mut Engine, name: &str, args: &Value, changes: &mut Vec<Ch
         }
         "execute_import" => {
             let req = import_request(engine, args)?;
-            let r = engine.execute_import(&req, |_| {})?;
+            let r = engine.execute_import(&req, |p| progress.importing(&req, &p))?;
             changes.push(Change::Library {
                 root_id: Some(req.root_id.clone()),
                 reason: "import".into(),
@@ -1177,7 +1744,7 @@ fn call_tool(engine: &mut Engine, name: &str, args: &Value, changes: &mut Vec<Ch
         }
         "resolve_duplicates" => {
             let keep = need_str(args, "keep_project_id")?;
-            let report = engine.find_duplicates(|_| {})?;
+            let report = engine.find_duplicates(|p| progress.hashing(p))?;
             let member = report
                 .groups
                 .iter()
@@ -1212,7 +1779,7 @@ fn call_tool(engine: &mut Engine, name: &str, args: &Value, changes: &mut Vec<Ch
         }
         "remove_shared_files" => {
             let id = need_str(args, "project_id")?;
-            let report = engine.find_duplicates(|_| {})?;
+            let report = engine.find_duplicates(|p| progress.hashing(p))?;
             let member = report
                 .groups
                 .iter()
@@ -1285,10 +1852,47 @@ fn call_tool(engine: &mut Engine, name: &str, args: &Value, changes: &mut Vec<Ch
     }
 }
 
+/// The text of a project file, loose or inside a packed archive; refuses big and binary files.
+fn project_file_text(engine: &Engine, id: &str, rel: &str) -> std::result::Result<String, ToolError> {
+    let located = engine.locate(id, rel)?;
+    let size = match &located {
+        crate::packed::Located::Disk(path) => std::fs::metadata(path).map_err(|e| e.to_string())?.len(),
+        crate::packed::Located::Packed { .. } => engine
+            .get_project(id)?
+            .files
+            .iter()
+            .find(|f| f.rel_path == rel)
+            .map(|f| f.size)
+            .ok_or_else(|| ToolError::Failed(format!("{rel} is not in the packed archive")))?,
+    };
+    if size > MAX_TEXT_BYTES {
+        return Err(format!("{rel} is {size} bytes; only text files up to {MAX_TEXT_BYTES} bytes are read").into());
+    }
+    let bytes = located.read()?;
+    if bytes.iter().take(4096).filter(|b| **b == 0).count() > 0 {
+        return Err(format!("{rel} is not a text file").into());
+    }
+    Ok(String::from_utf8_lossy(&bytes).into_owned())
+}
+
 const NO_IMPORT_DIRS: &str = "no import folders are configured; the user can add one in Settings → MCP server";
 
 fn hint_view(h: &crate::hints::Hint) -> Value {
     json!({ "value": h.value, "source": h.source, "confidence": h.confidence })
+}
+
+/// `project_view` plus what `get_project` adds: the hints and the model page link.
+fn project_details(engine: &Engine, p: &Project) -> Value {
+    let mut v = project_view(engine, p);
+    if let Ok(h) = engine.project_hints(&p.id) {
+        v["hints"] = json!({
+            "creator": h.creator.iter().map(hint_view).collect::<Vec<_>>(),
+            "license": h.license.iter().map(hint_view).collect::<Vec<_>>(),
+            "source_url": h.source_url.iter().map(hint_view).collect::<Vec<_>>(),
+        });
+    }
+    v["model_page_url"] = json!(engine.model_page_url(&p.id).ok().flatten());
+    v
 }
 
 fn project_view(engine: &Engine, p: &Project) -> Value {
@@ -1373,7 +1977,6 @@ fn list_folder(dir: &Path) -> std::result::Result<Vec<Value>, ToolError> {
 mod tests {
     use super::*;
     use crate::model::SyncMode;
-    use crate::settings::McpSettings;
 
     fn touch(p: &Path, bytes: usize) {
         std::fs::create_dir_all(p.parent().unwrap()).unwrap();
@@ -1441,6 +2044,568 @@ mod tests {
                 .unwrap()["result"]["resources"],
             json!([])
         );
+    }
+
+    fn rpc(engine: &mut Engine, method: &str, params: Value) -> Value {
+        handle(engine, &json!({ "jsonrpc": "2.0", "id": 1, "method": method, "params": params }))
+            .response
+            .unwrap()
+    }
+
+    /// #100: projects are resources a client can list, page through and read, with their
+    /// text files and preview below them.
+    #[test]
+    fn projects_are_resources() {
+        let data = tempfile::tempdir().unwrap();
+        let lib = tempfile::tempdir().unwrap();
+        touch(&lib.path().join("Maker/Dragon Egg/egg.stl"), 10);
+        std::fs::write(lib.path().join("Maker/Dragon Egg/README.md"), "# Dragon Egg\nby Maker").unwrap();
+        std::fs::write(lib.path().join("Maker/Dragon Egg/print.pdf"), b"%PDF\0\0").unwrap();
+        touch(&lib.path().join("Vase/vase.stl"), 20);
+        let mut engine = Engine::open(data.path()).unwrap();
+        let root = engine.add_root(lib.path(), SyncMode::Manual).unwrap();
+        engine.scan_root(&root.id, |_| {}).unwrap();
+        let id = format!("{}:Maker/Dragon Egg", root.id);
+
+        let init = rpc(&mut engine, "initialize", json!({}));
+        assert_eq!(init["result"]["capabilities"]["resources"]["subscribe"], false);
+        assert!(init["result"]["instructions"].as_str().unwrap().contains("meshkeep://project/"));
+
+        let list = rpc(&mut engine, "resources/list", json!({}));
+        let resources = list["result"]["resources"].as_array().unwrap();
+        assert_eq!(resources.len(), 2);
+        assert!(list["result"].get("nextCursor").is_none(), "one page holds them all");
+        let egg = &resources[0];
+        assert_eq!(egg["title"], "Dragon Egg");
+        assert_eq!(egg["name"], "Maker/Dragon Egg");
+        assert_eq!(egg["mimeType"], "application/json");
+        let uri = egg["uri"].as_str().unwrap();
+        assert_eq!(uri, project_uri(&id));
+        assert!(
+            !uri["meshkeep://project/".len()..].contains(['/', ':', ' ']),
+            "the id is one encoded segment: {uri}"
+        );
+        assert_eq!(
+            rpc(&mut engine, "resources/list", json!({ "cursor": "nope" }))["error"]["code"],
+            -32602
+        );
+        assert_eq!(
+            rpc(&mut engine, "resources/list", json!({ "cursor": "100" }))["result"]["resources"],
+            json!([])
+        );
+
+        let templates = rpc(&mut engine, "resources/templates/list", json!({}));
+        let templates: Vec<&str> = templates["result"]["resourceTemplates"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|t| t["uriTemplate"].as_str().unwrap())
+            .collect();
+        assert_eq!(
+            templates,
+            [
+                "meshkeep://project/{id}",
+                "meshkeep://project/{id}/file/{+path}",
+                "meshkeep://project/{id}/thumbnail"
+            ]
+        );
+
+        // the project reads as the JSON get_project returns, plus where to go next
+        let read = rpc(&mut engine, "resources/read", json!({ "uri": uri }));
+        let content = &read["result"]["contents"][0];
+        assert_eq!(content["uri"], uri);
+        assert_eq!(content["mimeType"], "application/json");
+        let project: Value = serde_json::from_str(content["text"].as_str().unwrap()).unwrap();
+        assert_eq!(project["id"], id);
+        assert!(project["hints"].is_object());
+        assert_eq!(project["thumbnail_uri"], Value::Null, "no preview rendered yet");
+        let files = project["files"].as_array().unwrap();
+        let readme = files.iter().find(|f| f["rel_path"] == "README.md").unwrap();
+        assert!(files.iter().find(|f| f["rel_path"] == "egg.stl").unwrap().get("uri").is_none());
+        assert!(files.iter().find(|f| f["rel_path"] == "print.pdf").unwrap().get("uri").is_none());
+        // an unencoded id works too
+        let raw = rpc(&mut engine, "resources/read", json!({ "uri": format!("meshkeep://project/{id}") }));
+        assert_eq!(raw["result"]["contents"][0]["mimeType"], "application/json", "{raw}");
+
+        // a text file
+        let text = rpc(&mut engine, "resources/read", json!({ "uri": readme["uri"] }));
+        assert_eq!(text["result"]["contents"][0]["mimeType"], "text/markdown");
+        assert!(text["result"]["contents"][0]["text"].as_str().unwrap().contains("by Maker"));
+        let binary = rpc(&mut engine, "resources/read", json!({ "uri": format!("{uri}/file/print.pdf") }));
+        assert_eq!(binary["error"]["code"], -32602);
+        assert!(binary["error"]["message"].as_str().unwrap().contains("not a text file"));
+
+        // the preview, once one exists
+        let none = rpc(&mut engine, "resources/read", json!({ "uri": format!("{uri}/thumbnail") }));
+        assert_eq!(none["error"]["code"], -32002);
+        let png_bytes = b"\x89PNG\r\n\x1a\nnot really a picture";
+        engine.store_thumbnail(&id, png_bytes).unwrap();
+        let read = rpc(&mut engine, "resources/read", json!({ "uri": uri }));
+        let project: Value = serde_json::from_str(read["result"]["contents"][0]["text"].as_str().unwrap()).unwrap();
+        let thumb = project["thumbnail_uri"].as_str().unwrap();
+        let png = rpc(&mut engine, "resources/read", json!({ "uri": thumb }));
+        assert_eq!(png["result"]["contents"][0]["mimeType"], "image/png");
+        use base64::Engine as _;
+        assert_eq!(
+            png["result"]["contents"][0]["blob"],
+            base64::engine::general_purpose::STANDARD.encode(png_bytes)
+        );
+
+        // what does not exist says so with MCP's code, and nothing outside a project is reachable
+        for missing in [
+            "meshkeep://project/nope".to_string(),
+            format!("{uri}/file/missing.txt"),
+            format!("{uri}/file/..%2F..%2FVase%2Fvase.stl"),
+            format!("{uri}/other"),
+            "file:///etc/passwd".to_string(),
+        ] {
+            let r = rpc(&mut engine, "resources/read", json!({ "uri": missing }));
+            assert_eq!(r["error"]["code"], -32002, "{missing}: {r}");
+            assert_eq!(r["error"]["data"]["uri"], missing);
+        }
+    }
+
+    /// #101: the app's own AI suggestion as a tool, under the rules of ADR-0003: its own
+    /// switch, no request without a key, nothing written.
+    #[test]
+    fn the_ai_suggestion_is_a_tool_behind_its_own_switch_and_the_key() {
+        use crate::ai::{MockMode, MockProvider};
+        use std::sync::Arc;
+        let data = tempfile::tempdir().unwrap();
+        let lib = tempfile::tempdir().unwrap();
+        touch(&lib.path().join("benchy boat/benchy.stl"), 10);
+        std::fs::write(lib.path().join("benchy boat/README.md"), "The jolly 3D printing torture-test").unwrap();
+        touch(&lib.path().join("Vase/vase.stl"), 20);
+        let mut engine = Engine::open(data.path()).unwrap();
+        let root = engine.add_root(lib.path(), SyncMode::Manual).unwrap();
+        engine.scan_root(&root.id, |_| {}).unwrap();
+        let mock = Arc::new(MockProvider::new(MockMode::Ok));
+        engine.set_ai_provider(Some(mock.clone()));
+        let id = format!("{}:benchy boat", root.id);
+        let listed = |e: &mut Engine| {
+            rpc(e, "tools/list", json!({}))["result"]["tools"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .find(|t| t["name"] == "suggest_metadata")
+                .cloned()
+        };
+        let ask = |e: &mut Engine, id: &str, key: Option<AiKey>| {
+            let out = handle_with(
+                e,
+                &json!({ "jsonrpc": "2.0", "id": 1, "method": "tools/call", "params": { "name": "suggest_metadata", "arguments": { "project_id": id } } }),
+                &mut Session {
+                    ai_key: key,
+                    ..Default::default()
+                },
+            );
+            assert!(out.changes.is_empty(), "a suggestion changes nothing");
+            out
+        };
+        let failure = |out: Outcome| {
+            let r = out.finish().response.unwrap();
+            assert_eq!(r["result"]["isError"], true, "{r}");
+            r["result"]["content"][0]["text"].as_str().unwrap().to_string()
+        };
+        let stored = || Ok(Some("sk-test".to_string()));
+
+        // off by default: not listed, refused even with a key
+        assert!(listed(&mut engine).is_none());
+        assert!(failure(ask(&mut engine, &id, Some(&stored))).contains("AI suggestions for agents are off"));
+        engine
+            .set_mcp_settings(McpSettings {
+                allow_ai: true,
+                ..Default::default()
+            })
+            .unwrap();
+        let tool = listed(&mut engine).unwrap();
+        assert_eq!(tool["annotations"]["readOnlyHint"], true);
+        assert_eq!(tool["annotations"]["openWorldHint"], true, "it calls a service outside the machine");
+
+        // no key, no request: whether the shell lends no reader, finds no key or cannot read it
+        assert!(failure(ask(&mut engine, &id, None)).contains("API key"));
+        assert!(failure(ask(&mut engine, &id, Some(&|| Ok(None)))).contains("API key"));
+        assert!(failure(ask(&mut engine, &id, Some(&|| Ok(Some("  ".into()))))).contains("API key"));
+        assert!(failure(ask(&mut engine, &id, Some(&|| Err("keyring locked".into())))).contains("keyring locked"));
+        assert_eq!(mock.calls(), 0);
+
+        // with a key the call is deferred, so the shell can make it without the engine lock
+        let out = ask(&mut engine, &id, Some(&stored));
+        assert!(out.response.is_none());
+        assert!(out.deferred.is_some());
+        assert_eq!(mock.calls(), 0);
+        let v = structured(&out.finish().response.unwrap());
+        assert_eq!(mock.calls(), 1);
+        assert_eq!(v["project_id"], id);
+        assert_eq!(v["creator"], "Mock Creator");
+        assert_eq!(v["title"], "Benchy Boat");
+        assert_eq!(v["cached"], false);
+        assert_eq!(v["sent"]["documents"], json!(["README.md"]));
+        assert_eq!(v["sent"]["thumbnail"], false);
+        assert!(v["note"].as_str().unwrap().contains("nothing was written"));
+        // a suggestion is never written
+        assert!(!lib.path().join("benchy boat/project.yaml").exists());
+        assert_eq!(engine.get_project(&id).unwrap().creator, None);
+
+        // the answer is a cache: asking again costs nothing
+        let v = structured(&ask(&mut engine, &id, Some(&stored)).finish().response.unwrap());
+        assert_eq!(v["cached"], true);
+        assert_eq!(mock.calls(), 1);
+
+        // inside a batch it runs in place, so the answers keep their order
+        let vase = format!("{}:Vase", root.id);
+        let batch = handle_with(
+            &mut engine,
+            &json!([
+                { "jsonrpc": "2.0", "id": 1, "method": "tools/call", "params": { "name": "suggest_metadata", "arguments": { "project_id": vase } } },
+                { "jsonrpc": "2.0", "id": 2, "method": "ping" },
+            ]),
+            &mut Session {
+                ai_key: Some(&stored),
+                ..Default::default()
+            },
+        );
+        assert!(batch.deferred.is_none());
+        let answers = batch.response.unwrap();
+        assert_eq!(answers[0]["result"]["structuredContent"]["title"], "Vase");
+        assert_eq!(answers[1]["id"], 2);
+
+        // what the provider refuses reaches the agent as the tool's error
+        engine.set_ai_provider(Some(Arc::new(MockProvider::new(MockMode::Unauthorized))));
+        std::fs::write(lib.path().join("Vase/notes.txt"), "changed, so the cached answer no longer applies").unwrap();
+        engine.scan_root(&root.id, |_| {}).unwrap();
+        assert!(failure(ask(&mut engine, &vase, Some(&stored))).contains("rejected the API key"));
+        assert!(failure(ask(&mut engine, "nope", Some(&stored))).contains("project not found"));
+    }
+
+    /// #102: a long tool tells the client how far it is, when the request carries a
+    /// progress token and the shell can deliver.
+    #[test]
+    fn long_tools_report_progress_to_a_request_that_asks_for_it() {
+        let data = tempfile::tempdir().unwrap();
+        let lib = tempfile::tempdir().unwrap();
+        let downloads = tempfile::tempdir().unwrap();
+        std::fs::create_dir_all(lib.path().join("A")).unwrap();
+        std::fs::create_dir_all(lib.path().join("B")).unwrap();
+        std::fs::write(lib.path().join("A/part.stl"), b"solid the same part").unwrap();
+        std::fs::write(lib.path().join("B/part.stl"), b"solid the same part").unwrap();
+        std::fs::write(downloads.path().join("clip.stl"), b"solid clip").unwrap();
+        std::fs::write(downloads.path().join("hook.stl"), b"solid hook").unwrap();
+        let mut engine = Engine::open(data.path()).unwrap();
+        engine.set_deleter(std::sync::Arc::new(|p: &Path| std::fs::remove_file(p)));
+        engine
+            .set_mcp_settings(McpSettings {
+                allow_writes: true,
+                import_dirs: vec![downloads.path().to_path_buf()],
+                ..Default::default()
+            })
+            .unwrap();
+        let root = engine.add_root(lib.path(), SyncMode::Manual).unwrap();
+        engine.scan_root(&root.id, |_| {}).unwrap();
+        let run = |e: &mut Engine, name: &str, args: Value, token: Option<Value>| {
+            let mut notes: Vec<Value> = Vec::new();
+            let mut sink = |v: Value| notes.push(v);
+            let mut params = json!({ "name": name, "arguments": args });
+            if let Some(t) = token {
+                params["_meta"] = json!({ "progressToken": t });
+            }
+            let message = json!({ "jsonrpc": "2.0", "id": 9, "method": "tools/call", "params": params });
+            let out = handle_with(
+                e,
+                &message,
+                &mut Session {
+                    notify: Some(&mut sink),
+                    ..Default::default()
+                },
+            );
+            (structured(&out.response.unwrap()), notes)
+        };
+        let rising = |notes: &[Value]| {
+            notes
+                .windows(2)
+                .all(|w| w[0]["params"]["progress"].as_f64().unwrap() < w[1]["params"]["progress"].as_f64().unwrap())
+        };
+
+        // no token, no notifications: a client that did not ask gets nothing it did not ask for
+        let fresh = tempfile::tempdir().unwrap();
+        let mut quiet = Engine::open(fresh.path()).unwrap();
+        let quiet_root = quiet.add_root(lib.path(), SyncMode::Manual).unwrap();
+        quiet.scan_root(&quiet_root.id, |_| {}).unwrap();
+        let (v, notes) = run(&mut quiet, "find_duplicates", json!({}), None);
+        assert_eq!(v["hashed"], 2);
+        assert!(notes.is_empty());
+
+        // duplicates: the hashing step, in files, from nothing to all of them
+        let (v, notes) = run(&mut engine, "find_duplicates", json!({}), Some(json!("tok-1")));
+        assert_eq!(v["groups"].as_array().unwrap().len(), 1);
+        assert_eq!(notes.len(), 2, "{notes:?}");
+        for n in &notes {
+            assert_eq!(n["jsonrpc"], "2.0");
+            assert_eq!(n["method"], "notifications/progress");
+            assert!(n.get("id").is_none(), "a notification carries no id");
+            assert_eq!(n["params"]["progressToken"], "tok-1");
+            assert_eq!(n["params"]["total"], 2.0);
+        }
+        assert_eq!(notes[0]["params"]["progress"], 0.0);
+        assert_eq!(notes[1]["params"]["progress"], 2.0);
+        assert_eq!(notes[1]["params"]["message"], "Hashing model files: 2 of 2");
+        // nothing left to hash, nothing to report
+        let (_, notes) = run(&mut engine, "find_duplicates", json!({}), Some(json!("tok-2")));
+        assert!(notes.is_empty());
+
+        // an import counts its items, twice when metadata follows; a numeric token comes back as sent
+        let items = json!([
+            { "source": downloads.path().join("clip.stl"), "action": "project", "name": "Clip" },
+            { "source": downloads.path().join("hook.stl"), "action": "project", "name": "Hook" },
+        ]);
+        let (v, notes) = run(
+            &mut engine,
+            "execute_import",
+            json!({ "root_id": root.id, "items": items }),
+            Some(json!(7)),
+        );
+        assert_eq!(v["projects"], json!(["Clip", "Hook"]));
+        assert!(!notes.is_empty());
+        assert_eq!(notes[0]["params"]["progressToken"], 7);
+        assert_eq!(notes[0]["params"]["progress"], 0.0);
+        assert_eq!(notes[0]["params"]["total"], 4.0);
+        assert_eq!(notes[0]["params"]["message"], "Importing Clip (1 of 2)");
+        assert!(rising(&notes));
+
+        // packing counts projects
+        let ids = json!([format!("{}:Clip", root.id), format!("{}:Hook", root.id)]);
+        let (v, notes) = run(&mut engine, "pack_projects", json!({ "project_ids": ids }), Some(json!("p")));
+        assert_eq!(v["projects"].as_array().unwrap().len(), 2, "{v}");
+        assert_eq!(notes[0]["params"]["total"], 2.0);
+        assert!(notes[0]["params"]["message"]
+            .as_str()
+            .unwrap()
+            .starts_with("Packing project 1 of 2"));
+        assert!(rising(&notes));
+        assert!(notes.iter().all(|n| n["params"]["progress"].as_f64().unwrap() < 2.0));
+        let (_, notes) = run(&mut engine, "unpack_projects", json!({ "project_ids": ids }), Some(json!("u")));
+        assert!(notes[0]["params"]["message"]
+            .as_str()
+            .unwrap()
+            .starts_with("Unpacking project 1 of 2"));
+        // a scan has no total to offer
+        let (_, notes) = run(&mut engine, "scan_root", json!({ "root_id": root.id }), Some(json!("s")));
+        assert!(notes.iter().all(|n| n["params"].get("total").is_none()));
+
+        // what the shell asks before it opens a stream
+        let call = |meta: Value| json!({ "jsonrpc": "2.0", "id": 1, "method": "tools/call", "params": { "name": "find_duplicates", "_meta": meta } });
+        assert!(wants_progress(&call(json!({ "progressToken": "t" }))));
+        assert!(wants_progress(&call(json!({ "progressToken": 3 }))));
+        assert!(!wants_progress(&call(json!({}))));
+        assert!(!wants_progress(&call(json!({ "progressToken": null }))));
+        assert!(!wants_progress(
+            &json!({ "jsonrpc": "2.0", "id": 1, "method": "ping", "params": { "_meta": { "progressToken": "t" } } })
+        ));
+        assert!(
+            !wants_progress(&json!([call(json!({ "progressToken": "t" }))])),
+            "batches answer in one piece"
+        );
+    }
+
+    #[test]
+    fn progress_rises_and_is_not_sent_more_often_than_a_client_can_use() {
+        let mut notes: Vec<Value> = Vec::new();
+        let mut sink = |v: Value| notes.push(v);
+        let mut p = Progress::new(Some(json!("t")), Some(&mut sink));
+        p.report(0.0, Some(10.0), || "start".into());
+        p.report(1.0, Some(10.0), || "too soon".into());
+        p.sent_at = Some(std::time::Instant::now() - PROGRESS_EVERY);
+        p.report(2.0, Some(10.0), || "later".into());
+        p.sent_at = Some(std::time::Instant::now() - PROGRESS_EVERY);
+        p.report(2.0, Some(10.0), || "not a step forward".into());
+        p.report(1.5, Some(10.0), || "backwards".into());
+        p.report(10.0, Some(10.0), || "done is always said".into());
+        let said: Vec<&str> = notes.iter().map(|n| n["params"]["message"].as_str().unwrap()).collect();
+        assert_eq!(said, ["start", "later", "done is always said"]);
+        // without a token or without a way to deliver, nothing happens
+        let mut none = Progress::new(None, None);
+        none.report(1.0, None, || unreachable!("the message is not even built"));
+    }
+
+    /// #103: every writing call that changed something leaves a line in the journal the
+    /// window shows: which tool, which projects, when. Reading, dry runs and refused or
+    /// failed calls leave none.
+    #[test]
+    fn what_an_agent_changes_is_written_into_the_journal() {
+        let data = tempfile::tempdir().unwrap();
+        let lib = tempfile::tempdir().unwrap();
+        let downloads = tempfile::tempdir().unwrap();
+        touch(&lib.path().join("Dragon/dragon.stl"), 10);
+        touch(&lib.path().join("Vase/vase.stl"), 20);
+        std::fs::write(downloads.path().join("clip.stl"), b"solid clip").unwrap();
+        let mut engine = Engine::open(data.path()).unwrap();
+        engine.set_deleter(std::sync::Arc::new(|p: &Path| {
+            if p.is_dir() {
+                std::fs::remove_dir_all(p)
+            } else {
+                std::fs::remove_file(p)
+            }
+        }));
+        let root = engine.add_root(lib.path(), SyncMode::Manual).unwrap();
+        engine.scan_root(&root.id, |_| {}).unwrap();
+        let dragon = format!("{}:Dragon", root.id);
+        let vase = format!("{}:Vase", root.id);
+        let journal = |e: &Engine| e.mcp_audit(50, 0).unwrap();
+        let titles = |entry: &crate::audit::AuditEntry| entry.projects.iter().map(|p| p.title.clone()).collect::<Vec<_>>();
+
+        // refused (writes are off), reading and unknown tools: nothing to record
+        call(
+            &mut engine,
+            1,
+            "update_metadata",
+            json!({ "project_id": dragon, "creator": "Agent" }),
+        );
+        call(&mut engine, 2, "get_project", json!({ "project_id": dragon }));
+        call(&mut engine, 3, "scan_root", json!({ "root_id": root.id }));
+        call(&mut engine, 4, "no_such_tool", json!({}));
+        assert_eq!(journal(&engine).total, 0);
+
+        engine
+            .set_mcp_settings(McpSettings {
+                allow_writes: true,
+                allow_deletes: true,
+                import_dirs: vec![downloads.path().to_path_buf()],
+                ..Default::default()
+            })
+            .unwrap();
+        let before = time::OffsetDateTime::now_utc();
+        let (r, _) = call(
+            &mut engine,
+            5,
+            "update_metadata",
+            json!({ "project_id": dragon, "creator": "Agent", "tags": ["dragon"] }),
+        );
+        structured(&r);
+        let page = journal(&engine);
+        assert_eq!(page.total, 1);
+        let entry = &page.entries[0];
+        assert_eq!(entry.tool, "update_metadata");
+        assert_eq!(
+            entry.projects,
+            [AuditProject {
+                id: dragon.clone(),
+                title: "Dragon".into()
+            }]
+        );
+        assert_eq!(entry.project_count, 1);
+        assert_eq!(entry.args["creator"], "Agent");
+        assert_eq!(entry.failed, 0);
+        assert!(entry.at >= before && entry.at <= time::OffsetDateTime::now_utc());
+
+        // a failed call and a dry run changed nothing
+        let (r, _) = call(
+            &mut engine,
+            6,
+            "update_metadata",
+            json!({ "project_id": "nope", "creator": "Agent" }),
+        );
+        assert_eq!(r["result"]["isError"], true);
+        structured(&call(&mut engine, 7, "delete_project", json!({ "project_id": vase, "dry_run": true })).0);
+        structured(&call(&mut engine, 8, "remove_empty_folders", json!({ "root_id": root.id })).0);
+        assert_eq!(journal(&engine).total, 1);
+
+        // many projects in one call, one of them unknown: named as far as they exist, the failure counted
+        let (r, _) = call(
+            &mut engine,
+            9,
+            "batch_update",
+            json!({ "project_ids": [dragon, vase, "nope"], "add_tags": ["checked"] }),
+        );
+        assert_eq!(structured(&r)["updated"], 2);
+        let entry = journal(&engine).entries.remove(0);
+        assert_eq!(entry.tool, "batch_update");
+        assert_eq!(titles(&entry), ["Dragon", "Vase"]);
+        assert_eq!(entry.failed, 1);
+
+        // a rename gives the project a new id: the journal names it as it can be found now
+        structured(
+            &call(
+                &mut engine,
+                10,
+                "rename_project",
+                json!({ "project_id": vase, "new_name": "Tall Vase" }),
+            )
+            .0,
+        );
+        let entry = journal(&engine).entries.remove(0);
+        assert_eq!(
+            entry.projects,
+            [AuditProject {
+                id: format!("{}:Tall Vase", root.id),
+                title: "Tall Vase".into()
+            }]
+        );
+        assert_eq!(entry.args["new_name"], "Tall Vase");
+
+        // what a tool created is named from its result
+        let (r, _) = call(
+            &mut engine,
+            11,
+            "execute_import",
+            json!({ "root_id": root.id, "items": [{ "source": downloads.path().join("clip.stl"), "action": "project", "name": "Clip" }] }),
+        );
+        structured(&r);
+        let entry = journal(&engine).entries.remove(0);
+        assert_eq!(entry.tool, "execute_import");
+        assert_eq!(
+            entry.projects,
+            [AuditProject {
+                id: format!("{}:Clip", root.id),
+                title: "Clip".into()
+            }]
+        );
+
+        // a deleted project keeps the name it had
+        structured(&call(&mut engine, 12, "delete_project", json!({ "project_id": dragon })).0);
+        let page = journal(&engine);
+        assert_eq!(page.entries[0].tool, "delete_project");
+        assert_eq!(titles(&page.entries[0]), ["Dragon"]);
+        assert!(engine.get_project(&dragon).is_err());
+        // newest first, and the file is app data, not library content
+        let tools: Vec<&str> = page.entries.iter().map(|e| e.tool.as_str()).collect();
+        assert_eq!(
+            tools,
+            [
+                "delete_project",
+                "execute_import",
+                "rename_project",
+                "batch_update",
+                "update_metadata"
+            ]
+        );
+        assert!(data.path().join(crate::audit::AUDIT_FILE).is_file());
+
+        engine.clear_mcp_audit().unwrap();
+        assert_eq!(journal(&engine).total, 0);
+        assert!(
+            lib.path().join("Tall Vase/vase.stl").is_file(),
+            "clearing the history touches no library"
+        );
+    }
+
+    #[test]
+    fn resource_lists_page_with_a_cursor() {
+        let data = tempfile::tempdir().unwrap();
+        let lib = tempfile::tempdir().unwrap();
+        for i in 0..(RESOURCE_PAGE + 5) {
+            touch(&lib.path().join(format!("P{i:03}/part.stl")), 4);
+        }
+        let mut engine = Engine::open(data.path()).unwrap();
+        let root = engine.add_root(lib.path(), SyncMode::Manual).unwrap();
+        engine.scan_root(&root.id, |_| {}).unwrap();
+        let first = rpc(&mut engine, "resources/list", json!({}));
+        assert_eq!(first["result"]["resources"].as_array().unwrap().len(), RESOURCE_PAGE as usize);
+        let cursor = first["result"]["nextCursor"].clone();
+        assert!(cursor.is_string());
+        let second = rpc(&mut engine, "resources/list", json!({ "cursor": cursor }));
+        assert_eq!(second["result"]["resources"].as_array().unwrap().len(), 5);
+        assert!(second["result"].get("nextCursor").is_none());
+        assert_eq!(second["result"]["resources"][0]["title"], "P100");
     }
 
     #[test]
@@ -2209,11 +3374,17 @@ mod tests {
         let msg = |id: u64, name: &str, args: Value| json!({ "jsonrpc": "2.0", "id": id, "method": "tools/call", "params": { "name": name, "arguments": args } });
         let items = json!([{ "source": downloads.path().join("Cable Clip"), "action": "project", "name": "Cable Clip" }, { "source": downloads.path().join("hook.stl"), "action": "inbox" }]);
         // writes off: the shared path keeps the gate
+        fn window<'a>(show: &'a mut dyn FnMut(ImportProgress)) -> Session<'a> {
+            Session {
+                import_progress: Some(show),
+                ..Default::default()
+            }
+        }
         let mut none = |_: ImportProgress| {};
         let out = handle_shared(
             &shared,
             &msg(1, "execute_import", json!({ "root_id": root.id, "items": items })),
-            &mut none,
+            &mut window(&mut none),
         );
         assert_eq!(out.response.unwrap()["result"]["isError"], true);
         assert!(out.changes.is_empty());
@@ -2228,7 +3399,11 @@ mod tests {
             })
             .unwrap();
         // every other message takes the lock and goes the usual way
-        let out = handle_shared(&shared, &json!({ "jsonrpc": "2.0", "id": 2, "method": "ping" }), &mut none);
+        let out = handle_shared(
+            &shared,
+            &json!({ "jsonrpc": "2.0", "id": 2, "method": "ping" }),
+            &mut window(&mut none),
+        );
         assert_eq!(out.response.unwrap()["result"], json!({}));
         // during the copy phase the engine is free; during metadata it is held (by us)
         let mut free_during_copy = Vec::new();
@@ -2239,11 +3414,23 @@ mod tests {
             }
             phases.push(p.phase);
         };
+        // the client that asked with a progress token hears about it too (#102)
+        let mut notes: Vec<Value> = Vec::new();
+        let mut sink = |v: Value| notes.push(v);
+        let mut asking = msg(3, "execute_import", json!({ "root_id": root.id, "items": items }));
+        asking["params"]["_meta"] = json!({ "progressToken": "imp" });
         let out = handle_shared(
             &shared,
-            &msg(3, "execute_import", json!({ "root_id": root.id, "items": items })),
-            &mut probe,
+            &asking,
+            &mut Session {
+                notify: Some(&mut sink),
+                import_progress: Some(&mut probe),
+                ..Default::default()
+            },
         );
+        assert_eq!(notes[0]["params"]["progressToken"], "imp");
+        assert_eq!(notes[0]["params"]["message"], "Importing Cable Clip (1 of 2)");
+        assert_eq!(notes[0]["params"]["total"], 4.0);
         assert!(
             !free_during_copy.is_empty() && free_during_copy.iter().all(|f| *f),
             "{free_during_copy:?}"
@@ -2265,11 +3452,16 @@ mod tests {
                 .as_deref(),
             Some("PrintTools")
         );
+        // the import is in the journal of what agents changed, the refused one is not (#103)
+        let journal = shared.lock().unwrap().mcp_audit(10, 0).unwrap();
+        assert_eq!(journal.total, 1);
+        assert_eq!(journal.entries[0].tool, "execute_import");
+        assert_eq!(journal.entries[0].projects[0].title, "Cable Clip");
         // a bad request fails the same way as through `handle`
         let out = handle_shared(
             &shared,
             &msg(4, "execute_import", json!({ "root_id": root.id, "items": [] })),
-            &mut none,
+            &mut window(&mut none),
         );
         assert_eq!(out.response.unwrap()["result"]["isError"], true);
         assert!(shared.try_lock().is_some(), "the lock is released on failure");

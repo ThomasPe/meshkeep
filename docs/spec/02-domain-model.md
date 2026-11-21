@@ -225,6 +225,16 @@ bundle folder names (`container_dirs`) and `thumb_location` (`app_data` | `proje
 Written atomically, unknown keys survive. UI-only preferences (theme, language, view,
 notifications) stay in the webview's local storage. Per-root sync mode lives in `roots.json`.
 
+## Journal of agent changes: `mcp-audit.jsonl`
+
+What agents changed over MCP (ADR-0004, #103) is kept in `<app data>/mcp-audit.jsonl`: one
+JSON line per writing or deleting tool call that changed something, with the time, the
+tool, the projects it touched (id and title as they were then, at most 50 named plus the
+count), the arguments (long lists and texts shortened) and the number of failed items.
+App data, never library content: appended by the engine, trimmed to its newer half beyond
+2 MiB, cleared from Settings. A line that does not parse is skipped. It records; it holds
+nothing to undo a change with.
+
 ## State machine for a library root
 
 ```

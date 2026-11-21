@@ -89,11 +89,18 @@ pub fn apply_mcp_settings(app: &AppHandle) {
             }
         }
     });
+    // an agent's AI suggestion uses the key the user stored, read when it is needed (#101);
+    // an import it starts shows in the window like the window's own
+    let keys = app.clone();
     let progress_handle = app.clone();
-    let on_progress: crate::mcp_host::OnProgress = Arc::new(move |p| {
-        let _ = progress_handle.emit("import://progress", &p);
-    });
-    state.mcp.apply(&settings, state.engine.clone(), on_change, on_progress);
+    let hooks = crate::mcp_host::Hooks {
+        on_change,
+        ai_key: Arc::new(move || keys.state::<AppState>().ai_keys.get()),
+        on_import: Arc::new(move |p| {
+            let _ = progress_handle.emit("import://progress", &p);
+        }),
+    };
+    state.mcp.apply(&settings, state.engine.clone(), hooks);
 }
 
 /// In test mode with `MESHKEEP_FIXTURE_ROOT` set: register that folder (once) and scan it.

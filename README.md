@@ -69,7 +69,9 @@ CI builds and tests the real app there.
 - an MCP server for agents on the same machine (Claude Desktop, Claude Code): off by
   default, token-protected, read-only unless writes and deletes are allowed separately;
   agents can search, fill in metadata, import, tidy up duplicates and reorganize along the
-  library conventions ([ADR-0004](docs/decisions/0004-mcp-server.md))
+  library conventions; projects are also resources for clients that browse, long tools
+  report progress, and Settings lists what agents changed
+  ([ADR-0004](docs/decisions/0004-mcp-server.md))
 
 **App**
 

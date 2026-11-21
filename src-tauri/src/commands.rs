@@ -1271,6 +1271,22 @@ pub fn regenerate_mcp_token(app: AppHandle, state: State<AppState>) -> CmdResult
     Ok(saved)
 }
 
+/// What agents changed over MCP, newest first (#103).
+#[tauri::command(async)]
+pub fn mcp_audit(state: State<AppState>, limit: Option<u32>, offset: Option<u32>) -> CmdResult<meshkeep_engine::audit::AuditPage> {
+    Ok(state
+        .engine
+        .lock()
+        .unwrap()
+        .mcp_audit(limit.unwrap_or(50).clamp(1, 500), offset.unwrap_or(0))?)
+}
+
+/// Forgets that history. Nothing in a library changes.
+#[tauri::command(async)]
+pub fn clear_mcp_audit(state: State<AppState>) -> CmdResult<()> {
+    Ok(state.engine.lock().unwrap().clear_mcp_audit()?)
+}
+
 /// Server state plus what the Settings page needs to write the client configuration: the
 /// command that starts the stdio bridge (this executable, or its alias in an MSIX install,
 /// see `mcp_bridge::client_command`) and the user's downloads folder (the usual first

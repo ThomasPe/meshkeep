@@ -2,7 +2,7 @@
 // the Tauri commands, including error codes, so UI tests exercise real flows.
 import type { Backend, Unlisten } from './index';
 import { generate3mf, generateObj, generateStl } from '@/lib/mesh/generate';
-import type { AppError, Collection, FacetCount, FileEntry, FileKind, FileThumb, ThumbLocation, FolderNode, ImportItem, ImportProgress, InboxFile, LibraryChanged, LibraryRoot, ListQuery, Project, ProjectSummary, ScanProgress, SidecarStamp, SmartCollection, TagCount, ThumbJob, UpdateMetadata, HashProgress, AiSettingsView, MetadataSuggestion, Hints, CreatorSuggestion, EnrichProgress, McpSettings, ConventionDeviation, PackProgress, PackReport, ImportReport } from '@/lib/types';
+import type { AppError, Collection, FacetCount, FileEntry, FileKind, FileThumb, ThumbLocation, FolderNode, ImportItem, ImportProgress, InboxFile, LibraryChanged, LibraryRoot, ListQuery, Project, ProjectSummary, ScanProgress, SidecarStamp, SmartCollection, TagCount, ThumbJob, UpdateMetadata, HashProgress, AiSettingsView, MetadataSuggestion, Hints, CreatorSuggestion, EnrichProgress, McpAuditEntry, McpSettings, ConventionDeviation, PackProgress, PackReport, ImportReport } from '@/lib/types';
 
 const kindOf = (name: string): FileKind => {
   const ext = name.split('.').pop()?.toLowerCase() ?? '';
@@ -116,11 +116,18 @@ export function createMockBackend(): Backend {
   // AI assistance: endpoint and model in "settings", the key only as a flag (never readable back).
   // `?ai=unauthorized|rate_limited|invalid|unavailable` makes every call fail that way, like MESHKEEP_AI_MOCK.
   const network = { fetch_model_pages: false };
-  const mcp: McpSettings = { enabled: false, port: 7340, token: '', allow_writes: false, allow_deletes: false, import_dirs: [] };
+  const mcp: McpSettings = { enabled: false, port: 7340, token: '', allow_writes: false, allow_deletes: false, import_dirs: [], allow_ai: false };
   const conventions = new Map<string, string>();
   const ownPacks = new Set<string>(); // projects packed here (their archives keep the project's layout)
   const STARTER_CONVENTIONS = `# Library conventions for this folder (Meshkeep reads this file, agents receive it).\nversion: 1\nlayout:\n  pattern: "{creator}/{title}"\n  shared_folder: Misc\n  shared_threshold: 2\n  unknown_creator: Misc\ntitles:\n  strip: [thingiverse_id, date_suffix]\nmetadata:\n  tags: { language: en, case: lower, separator: "-" }\n  license_default: Personal use\n  licenses: [CC0-1.0, CC-BY-4.0, CC-BY-NC-SA-4.0, Personal use]\nnotes: |\n  Link the original model as the source, not a later remake.\n`;
   let mcpRequests = 0;
+  // what agents changed (#103): a short canned history, newest first; none on a first start
+  const ago = (minutes: number) => new Date(Date.now() - minutes * 60_000).toISOString();
+  const mcpAudit: McpAuditEntry[] = firstStart ? [] : [
+    { at: ago(20), tool: 'update_metadata', projects: [{ id: 'r1:Projects/Decor/Vase', title: 'Decorative Vase' }], project_count: 1, args: { project_id: 'r1:Projects/Decor/Vase', license: 'CC-BY-4.0', add_tags: ['spiral'] }, failed: 0 },
+    { at: ago(130), tool: 'batch_update', projects: [{ id: 'r1:Projects/Desk/Cable Clips', title: 'Cable Clips' }, { id: 'r1:Projects/Decor/Planter', title: 'Self-watering Planter' }], project_count: 2, args: { project_ids: ['r1:Projects/Desk/Cable Clips', 'r1:Projects/Decor/Planter', 'r1:Projects/Gone'], add_tags: ['checked'] }, failed: 1 },
+    { at: ago(60 * 26), tool: 'delete_project', projects: [{ id: 'r1:Projects/Calibration/Benchy copy', title: 'Low-Poly Benchy (copy)' }], project_count: 1, args: { project_id: 'r1:Projects/Calibration/Benchy copy' }, failed: 0 },
+  ];
   const mintToken = () => 'mk_' + Array.from({ length: 48 }, () => 'abcdef0123456789'[Math.floor(Math.random() * 16)]).join('');
   const aiSettings: AiSettingsView = { provider: 'anthropic', base_url: null, model: 'claude-haiku-5-5', hasKey: false };
   const aiFailure = new URLSearchParams(location.search).get('ai');
@@ -723,6 +730,8 @@ export function createMockBackend(): Backend {
       const w = window as unknown as { __mockMcp?: McpSettings[] }; (w.__mockMcp ??= []).push({ ...mcp });
       return { ...mcp, import_dirs: mcp.import_dirs.slice() };
     },
+    async mcpAudit(limit, offset) { await delay(20); return { entries: mcpAudit.slice(offset, offset + limit).map((e) => ({ ...e })), total: mcpAudit.length }; },
+    async clearMcpAudit() { await delay(20); mcpAudit.length = 0; },
     async regenerateMcpToken() { await delay(40); mcp.token = mintToken(); return { ...mcp, import_dirs: mcp.import_dirs.slice() }; },
     // conventions (#58): per root in memory; a text with "pattern:" is "parsed", "bad:" is invalid
     async getConventions(rootId) {
