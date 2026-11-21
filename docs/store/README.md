@@ -35,9 +35,10 @@ index schema discarded the newer index. A branch build can be published on purpo
    (`.github/scripts/dev-channel-publish.sh`). The feed is per platform:
    `latest-windows.json` and `latest-darwin.json`, selected by the `{{target}}`
    placeholder in the updater endpoint, so each job only replaces its own assets and a
-   failed build on one platform leaves the other platform's feed intact. The Windows job
-   also writes a plain `latest.json` for dev builds installed before the split; it can go
-   once those have updated.
+   failed build on one platform leaves the other platform's feed intact. The plain
+   `latest.json` that dev builds from before the split (2026-10-21) read is no longer
+   written since 2026-11-21, and the next publish removes the copy left on the release. A
+   dev build that old and never updated has to be installed by hand once.
 3. An installed dev build checks its feed once on startup and offers "Install and
    restart"; nothing installs without the click. Settings shows the channel badge and a
    manual check.

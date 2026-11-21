@@ -20,9 +20,9 @@ case "$TARGET" in
   windows)
     artifact=$(find target/release/bundle/nsis -name '*-setup.exe' | head -n 1)
     platforms='["windows-x86_64","windows-x86_64-nsis"]'
-    # latest.json is the feed of dev builds installed before the per-platform split; they
-    # update to a build that reads latest-windows.json and the duplicate can go away.
-    feeds=(latest-windows.json latest.json)
+    feeds=(latest-windows.json)
+    # latest.json was the feed before the per-platform split and is no longer written; it
+    # stays in this pattern so a copy left on the release is removed as a stale asset.
     own='^(.*-setup\.exe(\.sig)?|latest\.json|latest-windows\.json)$'
     ;;
   darwin)
