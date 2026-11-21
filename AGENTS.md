@@ -134,7 +134,8 @@ tiny ASCII STLs, an OBJ, a PrusaSlicer-style 3MF with an embedded preview, one p
 sidecar, one malformed sidecar, one nested sidecar, an attachment, ignored files.
 Browser mode (`npm run dev`, Playwright) uses the mock backend, which synthesizes STL, OBJ,
 3MF and image bytes so parsers, viewer and the thumbnail pipeline run for real there too;
-`?ai=unauthorized|rate_limited|invalid|unavailable` makes its AI calls fail that way.
+`?ai=unauthorized|rate_limited|invalid|unavailable` makes its AI calls fail that way. `?showcase=en|de`
+swaps the test library for the sample library of the Store and website screenshots.
 
 ## Conventions
 
@@ -164,6 +165,7 @@ Browser mode (`npm run dev`, Playwright) uses the mock backend, which synthesize
 | AI assistance | `crates/engine/src/ai.rs`, `src-tauri/src/keys.rs`, `src/features/library/SuggestDialog.tsx`, `AiCard` in `src/features/settings/SettingsPage.tsx` |
 | MSIX packaging, Store docs | `msix/`, `docs/store/` |
 | Icon drawings and generator (`npm run icons`) | `src/assets/brand/`, `scripts/generate-icons.mjs` |
+| Store and website screenshots (`npm run screenshots`), showcase library | `scripts/store-screenshots.mjs`, `src/lib/backend/showcase.ts`, `docs/store/screenshots/` |
 | Shell commands and events | `src-tauri/src/{commands,state}.rs` |
 | Backend facade (Tauri vs mock) | `src/lib/backend/` |
 | Mesh parsers (STL, OBJ, 3MF) and workers | `src/lib/mesh/`, `src/workers/{mesh,thumb}-worker.ts` |

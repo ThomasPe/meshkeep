@@ -35,9 +35,10 @@ index schema discarded the newer index. A branch build can be published on purpo
    (`.github/scripts/dev-channel-publish.sh`). The feed is per platform:
    `latest-windows.json` and `latest-darwin.json`, selected by the `{{target}}`
    placeholder in the updater endpoint, so each job only replaces its own assets and a
-   failed build on one platform leaves the other platform's feed intact. The Windows job
-   also writes a plain `latest.json` for dev builds installed before the split; it can go
-   once those have updated.
+   failed build on one platform leaves the other platform's feed intact. The plain
+   `latest.json` that dev builds from before the split (2026-10-21) read is no longer
+   written since 2026-11-21, and the next publish removes the copy left on the release. A
+   dev build that old and never updated has to be installed by hand once.
 3. An installed dev build checks its feed once on startup and offers "Install and
    restart"; nothing installs without the click. Settings shows the channel badge and a
    manual check.
@@ -184,9 +185,9 @@ Status: account created and the name **Meshkeep** reserved (2026-10-19); the dom
 - `runFullTrust` capability: the submission form asks for a reason. Text: "Desktop app
   that indexes user-selected folders of 3D model files; file access is limited to folders
   the user picks through the system dialog."
-- Screenshots: at least one 1366×768 or larger PNG per listing language; capture the
-  library grid with thumbnails, the project page with the 3D viewer, and the import
-  dialog.
+- Screenshots: at least one 1366×768 or larger PNG per listing language. Four per
+  language are in `docs/store/screenshots/`, taken by `npm run screenshots`; see
+  "Screenshots" in `docs/store/listing.md`.
 - Icons: see "Icons" below. The listing's own logos (1:1 at 1080×1080 or 2160×2160,
   optionally 2:3 at 720×1080) are uploaded in Partner Center and are not part of the
   package; without them the Store shows the package icon.

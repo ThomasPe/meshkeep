@@ -2,6 +2,7 @@
 // the Tauri commands, including error codes, so UI tests exercise real flows.
 import type { Backend, Unlisten } from './index';
 import { generate3mf, generateObj, generateStl } from '@/lib/mesh/generate';
+import { showcaseLanguage, showcaseProjects, showcaseStl } from './showcase';
 import type { AppError, Collection, FacetCount, FileEntry, FileKind, FileThumb, ThumbLocation, FolderNode, ImportItem, ImportProgress, InboxFile, LibraryChanged, LibraryRoot, ListQuery, Project, ProjectSummary, ScanProgress, SidecarStamp, SmartCollection, TagCount, ThumbJob, UpdateMetadata, HashProgress, AiSettingsView, MetadataSuggestion, Hints, CreatorSuggestion, EnrichProgress, McpAuditEntry, McpSettings, ConventionDeviation, PackProgress, PackReport, ImportReport } from '@/lib/types';
 
 const kindOf = (name: string): FileKind => {
@@ -110,6 +111,14 @@ export function createMockBackend(): Backend {
     projects.push(mk('r1', `Projects/Misc/Part ${String(i).padStart(2, '0')}`, `Misc Part ${i}`, { creator: i % 3 ? 'Various' : null, tags: i % 2 ? ['misc'] : ['misc', 'spare'], has_sidecar: i % 4 !== 0, files: [f(`part_${i}.stl`, (i % 7 + 1) * MB)], daysAgo: 130 + i }));
   }
   if (firstStart) projects.length = 0;
+  // `?showcase=en|de`: the sample library of the Store and website screenshots (showcase.ts)
+  const showcase = showcaseLanguage(new URLSearchParams(location.search).get('showcase'));
+  if (showcase) {
+    projects.length = 0;
+    for (const s of showcaseProjects(showcase)) {
+      projects.push(mk(s.root, s.path, s.title, { creator: s.creator, license: s.license, source_url: s.source, tags: s.tags, material: s.material, supports_required: s.supports, description: s.description, favorite: s.favorite, offline: s.offline, daysAgo: s.daysAgo, files: s.files.map((x) => f(x.name, x.bytes, s.daysAgo)) }));
+    }
+  }
   let ignore = ['.git', '__MACOSX', '.DS_Store', 'Thumbs.db', '*.gcode'];
   let containers = ['files', 'stl', 'stls', 'models', '3d'];
   let thumbLocation: ThumbLocation = 'app_data';
@@ -122,8 +131,9 @@ export function createMockBackend(): Backend {
   const STARTER_CONVENTIONS = `# Library conventions for this folder (Meshkeep reads this file, agents receive it).\nversion: 1\nlayout:\n  pattern: "{creator}/{title}"\n  shared_folder: Misc\n  shared_threshold: 2\n  unknown_creator: Misc\ntitles:\n  strip: [thingiverse_id, date_suffix]\nmetadata:\n  tags: { language: en, case: lower, separator: "-" }\n  license_default: Personal use\n  licenses: [CC0-1.0, CC-BY-4.0, CC-BY-NC-SA-4.0, Personal use]\nnotes: |\n  Link the original model as the source, not a later remake.\n`;
   let mcpRequests = 0;
   // what agents changed (#103): a short canned history, newest first; none on a first start
+  // and none in the showcase library, whose projects are others
   const ago = (minutes: number) => new Date(Date.now() - minutes * 60_000).toISOString();
-  const mcpAudit: McpAuditEntry[] = firstStart ? [] : [
+  const mcpAudit: McpAuditEntry[] = firstStart || showcase ? [] : [
     { at: ago(20), tool: 'update_metadata', projects: [{ id: 'r1:Projects/Decor/Vase', title: 'Decorative Vase' }], project_count: 1, args: { project_id: 'r1:Projects/Decor/Vase', license: 'CC-BY-4.0', add_tags: ['spiral'] }, failed: 0 },
     { at: ago(130), tool: 'batch_update', projects: [{ id: 'r1:Projects/Desk/Cable Clips', title: 'Cable Clips' }, { id: 'r1:Projects/Decor/Planter', title: 'Self-watering Planter' }], project_count: 2, args: { project_ids: ['r1:Projects/Desk/Cable Clips', 'r1:Projects/Decor/Planter', 'r1:Projects/Gone'], add_tags: ['checked'] }, failed: 1 },
     { at: ago(60 * 26), tool: 'delete_project', projects: [{ id: 'r1:Projects/Calibration/Benchy copy', title: 'Low-Poly Benchy (copy)' }], project_count: 1, args: { project_id: 'r1:Projects/Calibration/Benchy copy' }, failed: 0 },
@@ -155,8 +165,12 @@ export function createMockBackend(): Backend {
   const pageCache = new Set<string>();
   const pageHints = new Map<string, { creator: string | null; license: string | null }>();
   const listeners = { enrich: new Set<(p: EnrichProgress) => void>(), dup: new Set<(p: HashProgress) => void>(), scan: new Set<(p: ScanProgress) => void>(), lib: new Set<(e: LibraryChanged) => void>(), proj: new Set<(e: { projectId: string }) => void>(), imp: new Set<(p: ImportProgress) => void>(), pack: new Set<(p: PackProgress) => void>(), coll: new Set<() => void>(), inbox: new Set<(e: { rootId: string }) => void>() };
-  const collections: Collection[] = [{ id: 'c_desk', name: 'Desk setup', projects: ['r1:Projects/Desk/Phone Stand', 'r1:Projects/Desk/Cable Clips'] }];
-  const smart: SmartCollection[] = [{ id: 's_grid', name: 'Gridfinity PLA', query: { tags: ['gridfinity'], sort: 'title' } }];
+  const collections: Collection[] = showcase
+    ? [{ id: 'c_desk', name: showcase === 'de' ? 'Schreibtisch' : 'Desk setup', projects: projects.filter((p) => /Phone Stand|Cable Clips|Handyständer|Kabelclips/.test(p.title)).map((p) => p.id) }, { id: 'c_gifts', name: showcase === 'de' ? 'Geschenkideen' : 'Gift ideas', projects: projects.filter((p) => /Vase|Planter|Pflanztopf|Lamp|Lampe/.test(p.title)).map((p) => p.id) }]
+    : [{ id: 'c_desk', name: 'Desk setup', projects: ['r1:Projects/Desk/Phone Stand', 'r1:Projects/Desk/Cable Clips'] }];
+  const smart: SmartCollection[] = showcase
+    ? [{ id: 's_functional', name: showcase === 'de' ? 'Funktionsteile' : 'Functional parts', query: { tags: [showcase === 'de' ? 'funktional' : 'functional'], sort: 'title' } }]
+    : [{ id: 's_grid', name: 'Gridfinity PLA', query: { tags: ['gridfinity'], sort: 'title' } }];
   const inbox = new Map<string, InboxFile[]>([['r1', [{ name: 'quick_download.stl', kind: 'model', size: 2.2 * MB, modified: new Date(Date.now() - 864e5).toISOString() }, { name: 'reference.jpg', kind: 'image', size: 0.4 * MB, modified: new Date(Date.now() - 2 * 864e5).toISOString() }]]]);
   const collChanged = () => listeners.coll.forEach((cb) => cb());
   const applyQuery = (list: MockProject[], q: ListQuery) => {
@@ -389,6 +403,7 @@ export function createMockBackend(): Backend {
       const forced = Number(params.get('mesh'));
       const tri = forced > 0 ? forced : Math.min(20000, Math.max(200, Math.round(file.size / 4096)));
       const ext = relPath.split('.').pop()?.toLowerCase();
+      if (ext === 'stl' && showcase) { const model = showcaseStl(file.name); if (model) return model; }
       if (ext === 'stl') return generateStl(tri, seed);
       if (ext === 'obj') return generateObj(tri, seed);
       if (ext === '3mf') return generate3mf();
@@ -566,7 +581,11 @@ export function createMockBackend(): Backend {
     },
     async storeEmbeddedFileThumbnail(_projectId, relPath) { throw err('not_allowed', `${relPath}: no embedded preview in browser mode`); },
     async fileThumbnailFailed(projectId, relPath) { fileThumbs.set(fileThumbId(projectId, relPath), { key: null, failed: true }); },
-    async pickImportFiles() { return ['C:\\Downloads\\Cable Clip.zip', 'C:\\Downloads\\loose_hook.stl', 'C:\\Downloads\\notes.7z']; },
+    async pickImportFiles() {
+      if (showcase === 'de') return ['C:\\Downloads\\Kabelwanne Schreibtisch.zip', 'C:\\Downloads\\Stiftehalter Wabe.zip', 'C:\\Downloads\\ersatzknopf_m6.stl'];
+      if (showcase) return ['C:\\Downloads\\Desk Cable Tray.zip', 'C:\\Downloads\\Honeycomb Pen Holder.zip', 'C:\\Downloads\\spare_knob_m6.stl'];
+      return ['C:\\Downloads\\Cable Clip.zip', 'C:\\Downloads\\loose_hook.stl', 'C:\\Downloads\\notes.7z'];
+    },
     async analyzeImport(paths) {
       await delay(80);
       return paths.map((source): ImportItem => {
