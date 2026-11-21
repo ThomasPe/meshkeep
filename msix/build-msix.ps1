@@ -39,6 +39,7 @@ function Find-SdkTool([string]$name) {
   return $tool.FullName
 }
 $makeappx = Find-SdkTool "makeappx.exe"
+$makepri = Find-SdkTool "makepri.exe"
 
 # 1. Layout
 $layout = Join-Path $target "msix-layout"
@@ -53,6 +54,33 @@ $xml = $xml -replace 'Identity Name="[^"]+"', "Identity Name=`"$IdentityName`""
 $xml = $xml -replace 'Publisher="[^"]+"', "Publisher=`"$Publisher`""
 $xml = $xml -replace '<PublisherDisplayName>[^<]*</PublisherDisplayName>', "<PublisherDisplayName>$PublisherDisplayName</PublisherDisplayName>"
 Set-Content $manifest $xml -Encoding UTF8
+
+# 1b. resources.pri. The manifest names `Assets\Square44x44Logo.png`; which file Windows
+#     shows for it (scale-200, targetsize-24_altform-unplated, ...) is looked up in this
+#     index. Without it only the unqualified 100 % files are ever used: blurry on a scaled
+#     display, and the taskbar icon sits on a plate.
+$priConfig = Join-Path $target "msix-priconfig.xml"
+& $makepri createconfig /cf $priConfig /dq en-US /pv 10.0.0 /o
+if ($LASTEXITCODE -ne 0) { throw "makepri createconfig failed ($LASTEXITCODE)" }
+# createconfig plans one resource pack per language and scale (for bundles). This is a
+# single package, so everything goes into the one resources.pri.
+[xml]$cfg = Get-Content $priConfig -Raw
+$packaging = $cfg.SelectSingleNode("//packaging")
+if ($packaging) { $packaging.ParentNode.RemoveChild($packaging) | Out-Null }
+$cfg.Save($priConfig)
+$pri = Join-Path $layout "resources.pri"
+& $makepri new /pr $layout /cf $priConfig /mn $manifest /of $pri /o
+if ($LASTEXITCODE -ne 0) { throw "makepri new failed ($LASTEXITCODE)" }
+$priFiles = @(Get-ChildItem $layout -Filter "*.pri")
+if ($priFiles.Count -ne 1) { throw "expected one resources.pri in the layout, found: $($priFiles.Name -join ', ')" }
+# The index has to know the qualified variants, or the step above was for nothing.
+$priDump = Join-Path $target "msix-pri-dump.xml"
+& $makepri dump /if $pri /of $priDump /o
+if ($LASTEXITCODE -ne 0) { throw "makepri dump failed ($LASTEXITCODE)" }
+$dump = Get-Content $priDump -Raw
+foreach ($asset in "Square44x44Logo.scale-200.png", "Square44x44Logo.targetsize-24_altform-unplated.png", "Square44x44Logo.targetsize-24_altform-lightunplated.png", "Square150x150Logo.scale-400.png") {
+  if ($dump -notmatch [regex]::Escape($asset)) { throw "resources.pri does not index $asset (see $priDump)" }
+}
 
 # 2. Pack
 $suffix = if ($Store) { "store" } else { "sideload" }

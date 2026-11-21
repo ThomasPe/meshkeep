@@ -1,7 +1,7 @@
 //! The MCP endpoint over a real socket: token and Origin checks, JSON in and out, and the
 //! change callback that keeps the window in sync.
 use meshkeep_engine::settings::McpSettings;
-use meshkeep_engine::Engine;
+use meshkeep_engine::{Engine, SharedEngine};
 use meshkeep_lib::mcp_host::{Hooks, Host};
 use std::sync::{Arc, Mutex};
 
@@ -17,7 +17,7 @@ fn serves_mcp_over_http_with_a_token() {
             ..Default::default()
         })
         .unwrap();
-    let engine = Arc::new(Mutex::new(engine));
+    let engine = Arc::new(SharedEngine::new(engine));
     let seen = Arc::new(Mutex::new(0usize));
     let counter = seen.clone();
     let key_reads = Arc::new(Mutex::new(0usize));
@@ -34,6 +34,7 @@ fn serves_mcp_over_http_with_a_token() {
                     *asked.lock().unwrap() += 1;
                     Ok(Some("sk-test".into()))
                 }),
+                on_import: Arc::new(|_| {}),
             },
         )
         .unwrap();
@@ -303,7 +304,7 @@ fn serves_mcp_over_http_with_a_token() {
 #[test]
 fn a_settings_change_keeps_the_server_reachable() {
     let data = tempfile::tempdir().unwrap();
-    let engine = Arc::new(Mutex::new(Engine::open(data.path()).unwrap()));
+    let engine = Arc::new(SharedEngine::new(Engine::open(data.path()).unwrap()));
     let hooks = || Hooks::changes_only(Arc::new(|_| {}));
     let port = std::net::TcpListener::bind("127.0.0.1:0").unwrap().local_addr().unwrap().port();
     let url = format!("http://127.0.0.1:{port}/mcp");

@@ -1,7 +1,9 @@
 //! The local MCP endpoint (ADR-0004): a small HTTP server on 127.0.0.1 that hands JSON-RPC
 //! messages to `meshkeep_engine::mcp`. Transport only: the token check, the Origin check
 //! (no browser page may reach it), one request at a time against the shared engine, and an
-//! event per change so the open window follows what an agent did.
+//! event per change so the open window follows what an agent did. The engine lock is taken
+//! per message by `mcp::handle_shared`, and an import releases it while files move, so the
+//! window's own commands are never stuck behind an agent's import for long.
 //!
 //! Streamable HTTP, the simple half: every message is a POST and the answer is JSON, no
 //! session ids, notifications get 202. One exception (#102): a `tools/call` that carries a
@@ -12,8 +14,9 @@
 //! (tiny_http closes only on the request's own `Connection: close`), so the bridge sends
 //! that header; a stopped server refuses new connections at once.
 
+use meshkeep_engine::import::ImportProgress;
 use meshkeep_engine::mcp::{self, Change};
-use meshkeep_engine::Engine;
+use meshkeep_engine::SharedEngine;
 use serde::Serialize;
 use std::io::{Read, Write};
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -23,6 +26,8 @@ use tiny_http::{Header, Method, Request, Response, Server};
 
 /// Called with the changes a message made, after the engine lock is released.
 pub type OnChange = Arc<dyn Fn(&[Change]) + Send + Sync>;
+/// Called with the progress of an import an agent started, like the window's own import.
+pub type OnProgress = Arc<dyn Fn(ImportProgress) + Send + Sync>;
 
 /// Reads the AI key from wherever the shell keeps it (the OS credential store), each time
 /// an agent asks for a suggestion; the key is never held here.
@@ -33,14 +38,18 @@ pub type ReadAiKey = Arc<dyn Fn() -> Result<Option<String>, String> + Send + Syn
 pub struct Hooks {
     pub on_change: OnChange,
     pub ai_key: ReadAiKey,
+    /// Progress of an import an agent started, for the window's own display.
+    pub on_import: OnProgress,
 }
 
 impl Hooks {
-    /// Hooks for a server that only reports changes: no AI key, so no AI request.
+    /// Hooks for a server that only reports changes: no AI key, so no AI request, and
+    /// nobody watching imports.
     pub fn changes_only(on_change: OnChange) -> Hooks {
         Hooks {
             on_change,
             ai_key: Arc::new(|| Ok(None)),
+            on_import: Arc::new(|_| {}),
         }
     }
 }
@@ -116,7 +125,7 @@ impl Host {
     }
 
     /// Starts on `addr` ("127.0.0.1:0" picks a free port) and returns the port in use.
-    pub fn start(&self, addr: &str, token: String, engine: Arc<Mutex<Engine>>, hooks: Hooks) -> Result<u16, String> {
+    pub fn start(&self, addr: &str, token: String, engine: Arc<SharedEngine>, hooks: Hooks) -> Result<u16, String> {
         self.stop();
         // a server of ours stopped a moment ago (off and on again, a restart) may still hold
         // the port: its listener closes shortly after it was told to
@@ -164,7 +173,7 @@ impl Host {
     /// settings change brings needs a restart except another port. Restarting on the same
     /// port would also race the old listener, which lets go of it only a moment after it
     /// was told to stop.
-    pub fn apply(&self, settings: &meshkeep_engine::settings::McpSettings, engine: Arc<Mutex<Engine>>, hooks: Hooks) {
+    pub fn apply(&self, settings: &meshkeep_engine::settings::McpSettings, engine: Arc<SharedEngine>, hooks: Hooks) {
         if !settings.enabled || settings.token.is_empty() {
             self.stop();
             *self.error.lock().unwrap() = None;
@@ -275,7 +284,7 @@ fn accepts_stream(req: &Request) -> bool {
     (version.0, version.1) >= (1, 1) && header(req, "Accept").is_some_and(|a| a.to_ascii_lowercase().contains("text/event-stream"))
 }
 
-fn serve(mut req: Request, token: &str, engine: &Arc<Mutex<Engine>>, hooks: &Hooks, stats: &Stats) {
+fn serve(mut req: Request, token: &str, engine: &Arc<SharedEngine>, hooks: &Hooks, stats: &Stats) {
     let message = match admit(&mut req, token, stats) {
         Ok(m) => m,
         Err(reply) => {
@@ -302,12 +311,12 @@ fn serve(mut req: Request, token: &str, engine: &Arc<Mutex<Engine>>, hooks: &Hoo
 /// Hands one message to the engine and returns its response (none for notifications).
 fn run(
     message: &serde_json::Value,
-    engine: &Arc<Mutex<Engine>>,
+    engine: &Arc<SharedEngine>,
     hooks: &Hooks,
     mut notify: Option<&mut dyn FnMut(serde_json::Value)>,
 ) -> Option<serde_json::Value> {
+    // the engine is locked inside, and for an import only to plan and to finish
     let outcome = {
-        let mut engine = engine.lock().unwrap();
         let ai_key = || (hooks.ai_key)();
         let streaming = notify.is_some();
         let mut relay = |note: serde_json::Value| {
@@ -315,12 +324,14 @@ fn run(
                 n(note)
             }
         };
-        mcp::handle_with(
-            &mut engine,
+        let mut import_progress = |p: ImportProgress| (hooks.on_import)(p);
+        mcp::handle_shared(
+            engine,
             message,
             &mut mcp::Session {
                 ai_key: Some(&ai_key),
                 notify: if streaming { Some(&mut relay) } else { None },
+                import_progress: Some(&mut import_progress),
             },
         )
     };

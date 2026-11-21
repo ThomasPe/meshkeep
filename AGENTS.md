@@ -84,6 +84,20 @@ right level, and all of these pass locally:
 Add or extend tests in the same change. Prefer the cheapest level that proves the
 behaviour: engine unit test > UI test in browser mode > real-app E2E.
 
+## Logging and diagnostics
+
+`tauri-plugin-log` writes `meshkeep.log` to the app log dir (5 MB, three generations) and
+stdout; engine code logs through `tracing` (the `log` bridge is on). `src-tauri/src/diag.rs`
+logs panics before the default hook. The engine is shared as `SharedEngine`
+(`crates/engine/src/lock.rs`): `lock()` works like a mutex but warns, with the caller's
+location, when a wait or a hold exceeds a second. Keep heavy work out of the lock, and keep
+sync commands on `#[tauri::command(async)]` so the window thread never waits for it. MCP
+write tools log one line each (`crates/engine/src/mcp.rs`). The Settings Diagnostics card
+exports a zip (`crates/engine/src/diagnostics.rs`: logs, redacted `settings.json` and
+`roots.json`, environment, data-dir listing); secrets are redacted by key name and user
+folders become `~`. The spec allows no telemetry or crash upload, so this package is the
+only way evidence travels. In test mode `MESHKEEP_PICK_SAVE_DIR` answers its folder picker.
+
 ## Command-line modes
 
 `meshkeep --mcp [url] [token]` runs no window: it is the stdio MCP bridge that forwards
@@ -97,7 +111,7 @@ command with `mcp_bridge::client_command`. The endpoint itself lives in
 `src-tauri/src/mcp_host.rs`; the tools in
 `crates/engine/src/mcp.rs`, where every new tool needs a test and, if it writes, the
 `allow_writes` gate (deleting tools the `allow_deletes` gate on top, trash only, with
-`dry_run`). A writing tool belongs in `tool_kind`: that is what gates it and what puts
+`dry_run`). A writing tool belongs in `is_write_tool`: that is what gates it and what puts
 its calls into the journal the window shows (`audit.rs`, `<data dir>/mcp-audit.jsonl`);
 it reports what it changed through `changes` and names the projects in its result. Library conventions (`crates/engine/src/conventions.rs`) are per root in
 `.meshkeep/conventions.yaml`; a rule the engine enforces belongs in `check_conventions`.
@@ -149,6 +163,7 @@ Browser mode (`npm run dev`, Playwright) uses the mock backend, which synthesize
 | MCP server | `crates/engine/src/{mcp,audit}.rs`, `src-tauri/src/{mcp_host,mcp_bridge}.rs`, `McpCard` and `McpAuditCard` in `src/features/settings/SettingsPage.tsx` |
 | AI assistance | `crates/engine/src/ai.rs`, `src-tauri/src/keys.rs`, `src/features/library/SuggestDialog.tsx`, `AiCard` in `src/features/settings/SettingsPage.tsx` |
 | MSIX packaging, Store docs | `msix/`, `docs/store/` |
+| Icon drawings and generator (`npm run icons`) | `src/assets/brand/`, `scripts/generate-icons.mjs` |
 | Shell commands and events | `src-tauri/src/{commands,state}.rs` |
 | Backend facade (Tauri vs mock) | `src/lib/backend/` |
 | Mesh parsers (STL, OBJ, 3MF) and workers | `src/lib/mesh/`, `src/workers/{mesh,thumb}-worker.ts` |

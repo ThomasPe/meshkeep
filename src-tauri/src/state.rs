@@ -1,6 +1,6 @@
 use meshkeep_engine::model::SyncMode;
 use meshkeep_engine::watch::{RootWatcher, WatchEvent};
-use meshkeep_engine::Engine;
+use meshkeep_engine::SharedEngine;
 use std::collections::HashMap;
 use std::path::PathBuf;
 use std::sync::{mpsc, Arc, Mutex};
@@ -50,7 +50,7 @@ impl RuntimeConfig {
 }
 
 pub struct AppState {
-    pub engine: Arc<Mutex<Engine>>,
+    pub engine: Arc<SharedEngine>,
     pub watchers: Mutex<HashMap<String, RootWatcher>>,
     pub watch_tx: mpsc::Sender<WatchEvent>,
     pub ai_keys: crate::keys::AiKeyStore,
@@ -89,11 +89,16 @@ pub fn apply_mcp_settings(app: &AppHandle) {
             }
         }
     });
-    // an agent's AI suggestion uses the key the user stored, read when it is needed (#101)
+    // an agent's AI suggestion uses the key the user stored, read when it is needed (#101);
+    // an import it starts shows in the window like the window's own
     let keys = app.clone();
+    let progress_handle = app.clone();
     let hooks = crate::mcp_host::Hooks {
         on_change,
         ai_key: Arc::new(move || keys.state::<AppState>().ai_keys.get()),
+        on_import: Arc::new(move |p| {
+            let _ = progress_handle.emit("import://progress", &p);
+        }),
     };
     state.mcp.apply(&settings, state.engine.clone(), hooks);
 }
