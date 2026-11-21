@@ -167,9 +167,21 @@ user applies them.
 >    alias meshkeep.exe so that such a program can start the app's stdio bridge
 >    ("meshkeep.exe --mcp"); started that way the app shows no window.
 
-## Screenshots to capture (1920×1080, light theme unless noted)
+## Screenshots
 
-1. Library grid with rendered thumbnails and the sidebar (favorites, collections).
-2. Project page with the 3D viewer and the metadata form.
-3. Import dialog with a dropped zip and a loose file.
-4. Dark theme variant of the library grid.
+`npm run screenshots` (`scripts/store-screenshots.mjs`) takes them from the built app in
+browser mode and writes four PNGs of 1920×1080 per listing language to
+`docs/store/screenshots/en/` and `docs/store/screenshots/de/`. Upload them in this order:
+
+1. `1-library.png`: library grid with rendered previews, the sidebar (favorites,
+   collections, folders) and the overview of tags, creators and licenses.
+2. `2-project.png`: project page with the 3D viewer, the file strip and the metadata form.
+3. `3-import.png`: import dialog with two zip downloads and a loose file.
+4. `4-library-dark.png`: the library grid in the dark theme.
+
+What they show is the showcase library (`?showcase=en|de`, `src/lib/backend/showcase.ts`):
+sample models generated for this purpose, with made-up creators, rendered by the app's own
+preview pipeline. No downloaded models and no real designers appear in the pictures.
+Browser mode has no window frame, so the pictures show the app's content area without the
+title bar. The same run refreshes the two pictures on the website (`site/assets/`).
+Rerun it after a visible change to the UI and commit the result.
