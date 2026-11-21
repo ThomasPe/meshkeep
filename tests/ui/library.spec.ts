@@ -732,6 +732,41 @@ test('MCP server: off by default, enabling mints a token, snippets and import fo
   await expect(page.getByTestId('mcp-snippets')).toHaveCount(0);
 });
 
+test('MCP audit: what agents changed is listed newest first, leads to the project and can be cleared (#103)', async ({ page }) => {
+  await page.getByTestId('nav-settings').click();
+  const entries = page.getByTestId('mcp-audit-entry');
+  await expect(entries).toHaveCount(3);
+  await expect(page.getByTestId('mcp-audit-count')).toHaveText('3 changes');
+  // which tool, which projects, when; a call that failed in part says so
+  await expect(entries.nth(0)).toHaveAttribute('data-tool', 'update_metadata');
+  await expect(entries.nth(0).locator('time')).toHaveAttribute('datetime', /^\d{4}-\d\d-\d\dT/);
+  await expect(entries.nth(0).getByTestId('mcp-audit-failed')).toHaveCount(0);
+  await expect(entries.nth(1)).toHaveAttribute('data-tool', 'batch_update');
+  await expect(entries.nth(1).getByTestId('mcp-audit-project')).toHaveText(['Cable Clips', 'Self-watering Planter']);
+  await expect(entries.nth(1).getByTestId('mcp-audit-failed')).toHaveText('1 item failed');
+  await expect(entries.nth(2)).toHaveAttribute('data-tool', 'delete_project');
+  await expect(entries.nth(2)).toContainText('Low-Poly Benchy (copy)');
+  // what the agent asked for is one click away
+  await expect(entries.nth(0).getByTestId('mcp-audit-args')).toBeHidden();
+  await entries.nth(0).getByTestId('mcp-audit-details').click();
+  await expect(entries.nth(0).getByTestId('mcp-audit-args')).toContainText('"license": "CC-BY-4.0"');
+  // a project named in the list opens
+  await entries.nth(0).getByTestId('mcp-audit-project').click();
+  await expect(page.getByTestId('project-title')).toHaveText('Decorative Vase');
+  await page.goBack();
+  // clearing asks first and removes only the list
+  await expect(entries).toHaveCount(3);
+  await page.getByTestId('mcp-audit-clear').click();
+  await expect(page.getByText('Only the list is removed.', { exact: false })).toBeVisible();
+  await page.getByTestId('mcp-audit-clear-confirm').click();
+  await expect(page.getByText('History cleared')).toBeVisible();
+  await expect(page.getByTestId('mcp-audit-empty')).toBeVisible();
+  await expect(entries).toHaveCount(0);
+  await expect(page.getByTestId('mcp-audit-clear')).toBeDisabled();
+  await page.getByTestId('nav-library').click();
+  await expect(page.getByTestId('project-card').filter({ hasText: 'Decorative Vase' })).toBeVisible();
+});
+
 test('first start: importing without a library offers to create one instead of a dead end (#51)', async ({ page }) => {
   await page.goto('/?empty=1#/library');
   await expect(page.getByTestId('welcome')).toBeVisible();

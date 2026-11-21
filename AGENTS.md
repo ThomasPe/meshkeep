@@ -97,7 +97,9 @@ command with `mcp_bridge::client_command`. The endpoint itself lives in
 `src-tauri/src/mcp_host.rs`; the tools in
 `crates/engine/src/mcp.rs`, where every new tool needs a test and, if it writes, the
 `allow_writes` gate (deleting tools the `allow_deletes` gate on top, trash only, with
-`dry_run`). Library conventions (`crates/engine/src/conventions.rs`) are per root in
+`dry_run`). A writing tool belongs in `tool_kind`: that is what gates it and what puts
+its calls into the journal the window shows (`audit.rs`, `<data dir>/mcp-audit.jsonl`);
+it reports what it changed through `changes` and names the projects in its result. Library conventions (`crates/engine/src/conventions.rs`) are per root in
 `.meshkeep/conventions.yaml`; a rule the engine enforces belongs in `check_conventions`.
 
 A project file is not always a file on disk: in a packed project (LIB-9) it is an entry of
@@ -144,6 +146,7 @@ Browser mode (`npm run dev`, Playwright) uses the mock backend, which synthesize
 | Spec, backlog, ADRs | `docs/` |
 | Engine | `crates/engine/src/{scan,sidecar,index,watch,roots,collections,settings,import,threemf,thumbs,engine}.rs` |
 | Import staging, inbox, collections UI | `src/features/import/`, `src/features/library/{InboxView,CollectionDialogs}.tsx` |
+| MCP server | `crates/engine/src/{mcp,audit}.rs`, `src-tauri/src/{mcp_host,mcp_bridge}.rs`, `McpCard` and `McpAuditCard` in `src/features/settings/SettingsPage.tsx` |
 | AI assistance | `crates/engine/src/ai.rs`, `src-tauri/src/keys.rs`, `src/features/library/SuggestDialog.tsx`, `AiCard` in `src/features/settings/SettingsPage.tsx` |
 | MSIX packaging, Store docs | `msix/`, `docs/store/` |
 | Shell commands and events | `src-tauri/src/{commands,state}.rs` |

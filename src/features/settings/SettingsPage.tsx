@@ -18,11 +18,12 @@ import { LANGUAGES, setLanguage, type Language } from '@/i18n';
 import { getBackend } from '@/lib/backend';
 import { reportError } from '@/lib/errors';
 import { formatDate, formatDuration } from '@/lib/format';
-import { invalidateLibrary, keys, useAiSettings, useMcpSettings, useMcpStatus, useRegenerateMcpToken, useSetMcpSettings, useNetworkSettings, useSetNetworkSettings, useAppInfo, useContainerDirs, useIgnorePatterns, useRoots, useSetAiKey, useSetAiSettings, useSetThumbLocation, useThumbLocation, useThumbStats } from '@/lib/queries';
+import { routeHref } from '@/lib/router';
+import { invalidateLibrary, keys, useAiSettings, useClearMcpAudit, useMcpAudit, useMcpSettings, useMcpStatus, useRegenerateMcpToken, useSetMcpSettings, useNetworkSettings, useSetNetworkSettings, useAppInfo, useContainerDirs, useIgnorePatterns, useRoots, useSetAiKey, useSetAiSettings, useSetThumbLocation, useThumbLocation, useThumbStats } from '@/lib/queries';
 import { kickThumbQueue, useThumbs } from '@/lib/thumbs/queue';
 import { dropThumbnailCache } from '@/lib/thumbs/useThumbnail';
 import { applyTheme, loadNotifications, loadTheme, saveNotifications, type Theme } from '@/lib/store';
-import { isAppError, type AiTestReport, type ConventionDeviation, type ConventionReport, type LibraryRoot, type McpSettings, type SyncMode, type ThumbLocation, type UpdateInfo } from '@/lib/types';
+import { isAppError, type AiTestReport, type ConventionDeviation, type ConventionReport, type LibraryRoot, type McpAuditEntry, type McpSettings, type SyncMode, type ThumbLocation, type UpdateInfo } from '@/lib/types';
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
 import { cn } from '@/lib/utils';
 
@@ -140,6 +141,8 @@ export function SettingsPage({ scanning, onScanEnd }: { scanning: ScanState; onS
         <NetworkCard />
 
         <McpCard />
+
+        <McpAuditCard />
 
         <ConventionsCard />
 
@@ -386,6 +389,71 @@ function McpCard() {
       )}
       <p className="rounded-[10px] bg-accent p-3 text-xs font-semibold text-accent-foreground" data-testid="mcp-sent">{t('settings.mcpSent')}</p>
     </Card>
+  );
+}
+
+const AUDIT_PAGE = 20;
+const AUDIT_PROJECTS_SHOWN = 4;
+
+/**
+ * What agents changed over MCP (#103): the engine's journal of writing tool calls, newest
+ * first. A record to inspect; taking a change back comes with undo/redo (APP-6).
+ */
+function McpAuditCard() {
+  const { t } = useTranslation();
+  const mcp = useMcpSettings();
+  const [limit, setLimit] = useState(AUDIT_PAGE);
+  const audit = useMcpAudit(limit, !!mcp.data?.enabled);
+  const clear = useClearMcpAudit();
+  const [confirming, setConfirming] = useState(false);
+  const entries = audit.data?.entries ?? [];
+  const total = audit.data?.total ?? 0;
+  return (
+    <Card title={t('settings.mcpAudit')} hint={t('settings.mcpAuditHint')} action={<Button size="sm" variant="outline" disabled={total === 0 || clear.isPending} onClick={() => setConfirming(true)} data-testid="mcp-audit-clear"><Trash2 />{t('settings.mcpAuditClear')}</Button>}>
+      {total === 0
+        ? <p className="py-3 text-sm text-muted-foreground" data-testid="mcp-audit-empty">{t('settings.mcpAuditEmpty')}</p>
+        : (
+          <>
+            <p className="py-2 text-xs font-semibold text-muted-foreground" data-testid="mcp-audit-count">{t('settings.mcpAuditCount', { count: total })}</p>
+            <ul className="grid" data-testid="mcp-audit">
+              {entries.map((e, i) => <McpAuditRow key={`${e.at}-${e.tool}-${i}`} entry={e} />)}
+            </ul>
+            {total > entries.length && <div className="pt-3"><Button size="sm" variant="outline" disabled={audit.isFetching} onClick={() => setLimit((n) => n + AUDIT_PAGE)} data-testid="mcp-audit-more">{t('settings.mcpAuditShowMore')}</Button></div>}
+            <p className="pt-3 text-xs text-muted-foreground">{t('settings.mcpAuditUndo')}</p>
+          </>
+        )}
+      <Dialog open={confirming} onOpenChange={setConfirming}>
+        <DialogContent>
+          <DialogHeader><DialogTitle>{t('settings.mcpAuditClearTitle')}</DialogTitle><DialogDescription>{t('settings.mcpAuditClearBody')}</DialogDescription></DialogHeader>
+          <DialogFooter><Button variant="outline" onClick={() => setConfirming(false)}>{t('common.cancel')}</Button><Button variant="destructive" data-testid="mcp-audit-clear-confirm" onClick={() => { setConfirming(false); clear.mutate(undefined, { onSuccess: () => { setLimit(AUDIT_PAGE); toast.success(t('settings.mcpAuditCleared')); }, onError: reportError }); }}>{t('settings.mcpAuditClear')}</Button></DialogFooter>
+        </DialogContent>
+      </Dialog>
+    </Card>
+  );
+}
+
+function McpAuditRow({ entry }: { entry: McpAuditEntry }) {
+  const { t, i18n } = useTranslation();
+  const when = new Date(entry.at);
+  const shown = entry.projects.slice(0, AUDIT_PROJECTS_SHOWN);
+  const more = entry.project_count - shown.length;
+  return (
+    <li className="grid gap-1.5 border-b border-border py-3 last:border-0" data-testid="mcp-audit-entry" data-tool={entry.tool}>
+      <div className="flex flex-wrap items-baseline gap-x-3 gap-y-1">
+        <code className="rounded-md bg-secondary px-1.5 py-0.5 font-mono text-xs font-semibold">{entry.tool}</code>
+        <time dateTime={entry.at} className="text-xs font-semibold text-muted-foreground" title={entry.at}>{Number.isNaN(when.getTime()) ? entry.at : when.toLocaleString(i18n.language, { dateStyle: 'medium', timeStyle: 'short' })}</time>
+        {entry.failed > 0 && <span className="text-xs font-semibold text-warning" data-testid="mcp-audit-failed">{t('settings.mcpAuditFailed', { count: entry.failed })}</span>}
+      </div>
+      <div className="flex flex-wrap items-center gap-x-1.5 gap-y-1 text-sm">
+        {shown.map((p) => <a key={p.id} href={routeHref({ page: 'project', id: p.id })} className="rounded-full bg-secondary px-2.5 py-0.5 text-xs font-semibold hover:bg-accent hover:text-accent-foreground" title={t('settings.mcpAuditProject', { title: p.title })} data-testid="mcp-audit-project">{p.title}</a>)}
+        {more > 0 && <span className="text-xs text-muted-foreground">{t('settings.mcpAuditMore', { count: more })}</span>}
+        {entry.project_count === 0 && <span className="text-xs text-muted-foreground">{t('settings.mcpAuditNoProjects')}</span>}
+      </div>
+      <details className="text-xs text-muted-foreground">
+        <summary className="cursor-pointer select-none font-semibold" data-testid="mcp-audit-details">{t('settings.mcpAuditDetails')}</summary>
+        <pre className="mt-1.5 overflow-x-auto rounded-[10px] bg-secondary p-3 font-mono text-[11px] leading-relaxed text-foreground" data-testid="mcp-audit-args">{JSON.stringify(entry.args, null, 2)}</pre>
+      </details>
+    </li>
   );
 }
 

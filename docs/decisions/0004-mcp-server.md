@@ -203,3 +203,30 @@ protocol has a way to say how far a request is: the client puts a `progressToken
 
 Not part of this: cancelling a running tool (`notifications/cancelled` is ignored; the
 tool finishes and its answer is dropped by the client).
+
+## Amendment 2026-11-20: a journal of what agents changed (#103)
+
+With writes allowed an agent changes projects without the user watching, and afterwards
+there was no place to see what it did. The window now has one: Settings → "What agents
+changed" lists every writing or deleting tool call that changed something, newest first,
+with the tool, the time, the projects it touched (as links) and the arguments the agent
+sent.
+
+- **The journal** is `<app data>/mcp-audit.jsonl`, one JSON line per call, written by
+  `mcp.rs` after the tool returned (`audit.rs`). Recorded: calls behind "Allow writes" or
+  "Allow deleting" that succeeded and changed something. Not recorded: reading tools, dry
+  runs, refused and failed calls, calls that found nothing to do. A call that failed in
+  part is recorded with the number of failed items.
+- **Projects are named as they were when the tool ran**, because ids change with a rename
+  or a move and a deleted project has no title afterwards; a rename or move is recorded
+  under the new id, so the link still leads there. At most 50 projects per entry are
+  named, the count is kept; long argument lists and texts are shortened.
+- **It is app data**, like the index: never inside a library, trimmed to its newer half
+  beyond 2 MiB, cleared by the user from the card. A journal that cannot be written is
+  logged and does not fail the change.
+- **It is a record, not an undo log.** The backlog planned this view on top of the undo
+  log of APP-6, so that a change can be inspected and taken back in the same place. APP-6
+  does not exist yet and inspecting does not need it, so the record comes first, in a
+  form undo can attach to: when APP-6 defines inverse operations, an entry here is where
+  an agent's change gets its "take back". Until then the card says that it cannot take a
+  change back and where a deleted file went (the trash).

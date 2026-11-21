@@ -34,6 +34,7 @@ export const keys = {
   network: ['network'] as const,
   mcp: ['mcp'] as const,
   mcpStatus: ['mcpStatus'] as const,
+  mcpAudit: (limit: number) => ['mcpAudit', limit] as const,
 };
 
 export const useAppInfo = () => useQuery({ queryKey: keys.appInfo, queryFn: async () => (await getBackend()).appInfo(), staleTime: Infinity });
@@ -95,13 +96,14 @@ export function useBackendEvents(onScan?: (rootId: string, found: number) => voi
     getBackend().then(async (b) => {
       const a = await b.onLibraryChanged((e) => {
         invalidateLibrary(qc);
+        qc.invalidateQueries({ queryKey: ['mcpAudit'] });
         if (e.reason === 'rename' && e.oldId) qc.removeQueries({ queryKey: keys.project(e.oldId) });
         if (e.reason === 'delete' && e.oldId) qc.removeQueries({ queryKey: keys.project(e.oldId) });
         if (e.reason === 'move') for (const id of e.oldIds ?? []) qc.removeQueries({ queryKey: keys.project(id) });
         if (e.reason === 'thumbs_cleared') { useThumbs.setState({ fresh: {} }); forgetAllFileThumbs(); }
         void kickThumbQueue();
       });
-      const c = await b.onProjectChanged((e) => { qc.invalidateQueries({ queryKey: keys.project(e.projectId) }); qc.invalidateQueries({ queryKey: ['projects'] }); qc.invalidateQueries({ queryKey: ['tags'] }); qc.invalidateQueries({ queryKey: ['facets'] }); qc.invalidateQueries({ queryKey: keys.stats }); void kickThumbQueue(); });
+      const c = await b.onProjectChanged((e) => { qc.invalidateQueries({ queryKey: keys.project(e.projectId) }); qc.invalidateQueries({ queryKey: ['mcpAudit'] }); qc.invalidateQueries({ queryKey: ['projects'] }); qc.invalidateQueries({ queryKey: ['tags'] }); qc.invalidateQueries({ queryKey: ['facets'] }); qc.invalidateQueries({ queryKey: keys.stats }); void kickThumbQueue(); });
       const s = await b.onScanProgress((p) => onScan?.(p.root_id, p.projects_found));
       const d = await b.onCollectionsChanged(() => { qc.invalidateQueries({ queryKey: keys.collections }); qc.invalidateQueries({ queryKey: keys.smart }); qc.invalidateQueries({ queryKey: ['projects'] }); qc.invalidateQueries({ queryKey: ['smartProjects'] }); });
       const i = await b.onInboxChanged((e) => { qc.invalidateQueries({ queryKey: keys.inbox(e.rootId) }); });
@@ -279,6 +281,12 @@ export function useSetNetworkSettings() {
 }
 export const useMcpSettings = () => useQuery({ queryKey: keys.mcp, queryFn: async () => (await getBackend()).getMcpSettings() });
 export const useMcpStatus = (enabled: boolean) => useQuery({ queryKey: keys.mcpStatus, queryFn: async () => (await getBackend()).mcpStatus(), refetchInterval: enabled ? 5000 : false });
+/** What agents changed over MCP (#103); refetched while the server runs, and whenever the library changes. */
+export const useMcpAudit = (limit: number, live: boolean) => useQuery({ queryKey: keys.mcpAudit(limit), queryFn: async () => (await getBackend()).mcpAudit(limit, 0), refetchInterval: live ? 5000 : false, placeholderData: (prev) => prev });
+export function useClearMcpAudit() {
+  const qc = useQueryClient();
+  return useMutation({ mutationFn: async () => (await getBackend()).clearMcpAudit(), onSuccess: () => qc.invalidateQueries({ queryKey: ['mcpAudit'] }) });
+}
 export function useSetMcpSettings() {
   const qc = useQueryClient();
   return useMutation({

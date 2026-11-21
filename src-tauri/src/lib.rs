@@ -146,6 +146,8 @@ pub fn run() {
             commands::set_mcp_settings,
             commands::regenerate_mcp_token,
             commands::mcp_status,
+            commands::mcp_audit,
+            commands::clear_mcp_audit,
             commands::get_conventions,
             commands::set_conventions,
             commands::starter_conventions,

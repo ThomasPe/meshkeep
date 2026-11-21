@@ -340,6 +340,11 @@ export interface NetworkSettings { fetch_model_pages: boolean }
 
 /** The local MCP server for AI agents (ADR-0004). */
 export interface McpSettings { enabled: boolean; port: number; token: string; allow_writes: boolean; allow_deletes: boolean; import_dirs: string[]; allow_ai: boolean }
+/** One writing tool call an agent made over MCP, as the journal recorded it (#103). `projects` holds at most 50 of `project_count`. */
+export interface McpAuditProject { id: string; title: string }
+export interface McpAuditEntry { at: string; tool: string; projects: McpAuditProject[]; project_count: number; args: Record<string, unknown>; failed: number }
+/** A page of that journal, newest first. */
+export interface McpAuditPage { entries: McpAuditEntry[]; total: number }
 /** Library conventions per root (#58): the file as text plus what it parses to. */
 export interface ConventionsView { root_id: string; path: string; text: string | null; parsed: Record<string, unknown> | null; error: string | null }
 export interface ConventionDeviation { project_id: string; rel_path: string; kind: 'folder' | 'title' | 'license' | 'tags'; current: string; expected: string; fixable: boolean }

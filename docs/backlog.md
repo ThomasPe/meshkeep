@@ -200,7 +200,8 @@ submission is outside the code: Partner Center identity values, screenshots
 - [ ] **Project tabs** (NAV-9).
 - [ ] **Dashboard** (NAV-10).
 - [ ] **Keymap** (APP-5).
-- [ ] **Undo/redo** (APP-6).
+- [ ] **Undo/redo** (APP-6). The journal of agent changes (#103) is where an agent's
+      change should get its "take back".
 - [ ] **Log viewer** (APP-8).
 - [x] **In-app feedback** (APP-12): Settings card and "Report" action on error toasts open a
       prefilled GitHub issue form (`.github/ISSUE_TEMPLATE/`) with version, OS, WebView and
@@ -290,8 +291,13 @@ cost estimate, import proposals in the staging dialog (see ADR-0003, features 4,
       that hash on the way), `execute_import`, `pack_projects`, `unpack_projects` and
       `scan_root`. Over HTTP the answer to such a call is an event stream on the same
       POST (for clients that accept one), over the stdio bridge one line per message.
-- [ ] **Follow-ups.** An audit view of what agents changed (reuse the undo log once APP-6
-      exists); cancelling a running tool.
+- [x] **A view of what agents changed** (#103, ADR-0004 amendment). Settings → "What
+      agents changed": every writing or deleting tool call that changed something, newest
+      first, with tool, time, projects (links) and the arguments; a journal in app data
+      (`mcp-audit.jsonl`), trimmed and clearable. A record only: taking a change back
+      from there waits for APP-6.
+- [ ] **Follow-ups.** Take an agent's change back from the journal (with the undo log of
+      APP-6); cancelling a running tool.
 
 ## Phase 3: Model tools
 - [ ] **Transforms & mesh analysis** (VIEW-7).

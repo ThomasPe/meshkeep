@@ -12,6 +12,7 @@
 //! its own: it is the one tool that makes the app itself call out (ADR-0003), with the
 //! user's key, and it never writes.
 
+use crate::audit::{AuditEntry, AuditProject};
 use crate::engine::{BatchUpdate, MoveFilesDest, PromoteItem, UpdateMetadata};
 use crate::error::EngineError;
 use crate::import::{ArchivePolicy, ImportAction, ImportRequest, ImportRequestItem};
@@ -249,7 +250,18 @@ fn handle_one(engine: &mut Engine, message: &Value, session: &mut Session) -> Ou
             } else {
                 let notify = session.notify.as_deref_mut();
                 let mut progress = Progress::new(progress_token(Some(&params)), notify);
-                call_tool(engine, name, &args, &mut changes, &mut progress)
+                // the journal names projects as they were before the call: ids change with a
+                // rename or a move, and a deleted project has no title afterwards
+                let named = if tool_kind(name) == ToolKind::Read {
+                    Vec::new()
+                } else {
+                    projects_named(engine, &args)
+                };
+                let result = call_tool(engine, name, &args, &mut changes, &mut progress);
+                if let (Ok(v), false, false) = (&result, changes.is_empty(), tool_kind(name) == ToolKind::Read) {
+                    record_change(engine, name, &args, named, v);
+                }
+                result
             };
             return Outcome {
                 response: Some(tool_response(id, result)),
@@ -1019,30 +1031,115 @@ fn prepare_suggestion(engine: &Engine, args: &Value, session: &Session) -> std::
 
 // ---- tools --------------------------------------------------------------------------------
 
+/// Which switch a tool sits behind.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ToolKind {
+    Read,
+    Write,
+    Delete,
+}
+
+fn tool_kind(name: &str) -> ToolKind {
+    match name {
+        "delete_file" | "delete_project" | "resolve_duplicates" | "remove_shared_files" => ToolKind::Delete,
+        "update_metadata"
+        | "set_page_thumbnail"
+        | "batch_update"
+        | "execute_import"
+        | "promote_inbox"
+        | "rename_project"
+        | "move_projects"
+        | "set_favorite"
+        | "add_to_collection"
+        | "move_files"
+        | "remove_empty_folders"
+        | "organize"
+        | "pack_projects"
+        | "unpack_projects" => ToolKind::Write,
+        _ => ToolKind::Read,
+    }
+}
+
+// ---- the journal of what agents changed (#103) ----------------------------------------------
+
+fn last_segment(rel: &str) -> &str {
+    rel.rsplit('/').next().filter(|s| !s.is_empty()).unwrap_or(rel)
+}
+
+/// The projects a call names in its arguments, with the titles they have right now.
+fn projects_named(engine: &Engine, args: &Value) -> Vec<AuditProject> {
+    let mut ids: Vec<String> = ["project_id", "keep_project_id"].iter().filter_map(|k| arg_str(args, k)).collect();
+    ids.extend(arg_strings(args, "project_ids").unwrap_or_default());
+    ids.into_iter()
+        .filter_map(|id| engine.get_project(&id).ok())
+        .map(|p| AuditProject { id: p.id, title: p.title })
+        .collect()
+}
+
+/// The projects a result names on top: the ones a tool created, moved to or took away.
+fn projects_in_result(args: &Value, v: &Value) -> Vec<AuditProject> {
+    let mut out = Vec::new();
+    let mut push = |id: Option<&str>, title: Option<&str>| {
+        if let (Some(id), Some(title)) = (id, title) {
+            out.push(AuditProject {
+                id: id.to_string(),
+                title: title.to_string(),
+            });
+        }
+    };
+    // a tool that answers with the project itself
+    push(v.get("id").and_then(|i| i.as_str()), v.get("title").and_then(|t| t.as_str()));
+    // an import lists the folders it created, relative to the root
+    if let (Some(root), Some(rels)) = (
+        args.get("root_id").and_then(|r| r.as_str()),
+        v.get("projects").and_then(|p| p.as_array()),
+    ) {
+        for rel in rels.iter().filter_map(|r| r.as_str()) {
+            push(Some(&Project::make_id(root, rel)), Some(last_segment(rel)));
+        }
+    }
+    for key in ["created", "moved", "trashed", "applied", "projects"] {
+        for row in v.get(key).and_then(|r| r.as_array()).into_iter().flatten() {
+            let id = row.get("id").or_else(|| row.get("project_id")).and_then(|i| i.as_str());
+            let title = row
+                .get("title")
+                .and_then(|t| t.as_str())
+                .or_else(|| row.get("rel_path").and_then(|r| r.as_str()).map(last_segment));
+            push(id, title);
+        }
+    }
+    if let Some(dest) = v.get("dest").filter(|d| d.is_object()) {
+        push(
+            dest.get("id").and_then(|i| i.as_str()),
+            dest.get("rel_path").and_then(|r| r.as_str()).map(last_segment),
+        );
+    }
+    out
+}
+
+/// Writes one line into the journal. A journal that cannot be written does not undo or fail
+/// the change it would have recorded; it is logged.
+fn record_change(engine: &Engine, tool: &str, args: &Value, mut projects: Vec<AuditProject>, result: &Value) {
+    if matches!(tool, "rename_project" | "move_projects") {
+        // these give projects a new id: the result names them as they can be found now
+        projects.clear();
+    }
+    projects.extend(projects_in_result(args, result));
+    let failed = ["failed", "errors"]
+        .iter()
+        .filter_map(|k| result.get(k).and_then(|f| f.as_array()))
+        .map(|a| a.len() as u32)
+        .sum();
+    let entry = AuditEntry::new(tool, args, projects, failed);
+    if let Err(e) = crate::audit::append(engine.data_dir(), &entry) {
+        tracing::warn!("MCP journal: {e}");
+    }
+}
+
 fn call_tool(engine: &mut Engine, name: &str, args: &Value, changes: &mut Vec<Change>, progress: &mut Progress) -> ToolResult {
     let settings = engine.mcp_settings();
-    let is_delete = matches!(
-        name,
-        "delete_file" | "delete_project" | "resolve_duplicates" | "remove_shared_files"
-    );
-    let is_write = is_delete
-        || matches!(
-            name,
-            "update_metadata"
-                | "set_page_thumbnail"
-                | "batch_update"
-                | "execute_import"
-                | "promote_inbox"
-                | "rename_project"
-                | "move_projects"
-                | "set_favorite"
-                | "add_to_collection"
-                | "move_files"
-                | "remove_empty_folders"
-                | "organize"
-                | "pack_projects"
-                | "unpack_projects"
-        );
+    let is_delete = tool_kind(name) == ToolKind::Delete;
+    let is_write = tool_kind(name) != ToolKind::Read;
     if is_write && !settings.allow_writes {
         return Err(ToolError::Failed(format!(
             "{name} is not available: writes are off. The user can allow them in Settings → MCP server."
@@ -2215,6 +2312,167 @@ mod tests {
         // without a token or without a way to deliver, nothing happens
         let mut none = Progress::new(None, None);
         none.report(1.0, None, || unreachable!("the message is not even built"));
+    }
+
+    /// #103: every writing call that changed something leaves a line in the journal the
+    /// window shows: which tool, which projects, when. Reading, dry runs and refused or
+    /// failed calls leave none.
+    #[test]
+    fn what_an_agent_changes_is_written_into_the_journal() {
+        let data = tempfile::tempdir().unwrap();
+        let lib = tempfile::tempdir().unwrap();
+        let downloads = tempfile::tempdir().unwrap();
+        touch(&lib.path().join("Dragon/dragon.stl"), 10);
+        touch(&lib.path().join("Vase/vase.stl"), 20);
+        std::fs::write(downloads.path().join("clip.stl"), b"solid clip").unwrap();
+        let mut engine = Engine::open(data.path()).unwrap();
+        engine.set_deleter(Box::new(|p: &Path| {
+            if p.is_dir() {
+                std::fs::remove_dir_all(p)
+            } else {
+                std::fs::remove_file(p)
+            }
+        }));
+        let root = engine.add_root(lib.path(), SyncMode::Manual).unwrap();
+        engine.scan_root(&root.id, |_| {}).unwrap();
+        let dragon = format!("{}:Dragon", root.id);
+        let vase = format!("{}:Vase", root.id);
+        let journal = |e: &Engine| e.mcp_audit(50, 0).unwrap();
+        let titles = |entry: &crate::audit::AuditEntry| entry.projects.iter().map(|p| p.title.clone()).collect::<Vec<_>>();
+
+        // refused (writes are off), reading and unknown tools: nothing to record
+        call(
+            &mut engine,
+            1,
+            "update_metadata",
+            json!({ "project_id": dragon, "creator": "Agent" }),
+        );
+        call(&mut engine, 2, "get_project", json!({ "project_id": dragon }));
+        call(&mut engine, 3, "scan_root", json!({ "root_id": root.id }));
+        call(&mut engine, 4, "no_such_tool", json!({}));
+        assert_eq!(journal(&engine).total, 0);
+
+        engine
+            .set_mcp_settings(McpSettings {
+                allow_writes: true,
+                allow_deletes: true,
+                import_dirs: vec![downloads.path().to_path_buf()],
+                ..Default::default()
+            })
+            .unwrap();
+        let before = time::OffsetDateTime::now_utc();
+        let (r, _) = call(
+            &mut engine,
+            5,
+            "update_metadata",
+            json!({ "project_id": dragon, "creator": "Agent", "tags": ["dragon"] }),
+        );
+        structured(&r);
+        let page = journal(&engine);
+        assert_eq!(page.total, 1);
+        let entry = &page.entries[0];
+        assert_eq!(entry.tool, "update_metadata");
+        assert_eq!(
+            entry.projects,
+            [AuditProject {
+                id: dragon.clone(),
+                title: "Dragon".into()
+            }]
+        );
+        assert_eq!(entry.project_count, 1);
+        assert_eq!(entry.args["creator"], "Agent");
+        assert_eq!(entry.failed, 0);
+        assert!(entry.at >= before && entry.at <= time::OffsetDateTime::now_utc());
+
+        // a failed call and a dry run changed nothing
+        let (r, _) = call(
+            &mut engine,
+            6,
+            "update_metadata",
+            json!({ "project_id": "nope", "creator": "Agent" }),
+        );
+        assert_eq!(r["result"]["isError"], true);
+        structured(&call(&mut engine, 7, "delete_project", json!({ "project_id": vase, "dry_run": true })).0);
+        structured(&call(&mut engine, 8, "remove_empty_folders", json!({ "root_id": root.id })).0);
+        assert_eq!(journal(&engine).total, 1);
+
+        // many projects in one call, one of them unknown: named as far as they exist, the failure counted
+        let (r, _) = call(
+            &mut engine,
+            9,
+            "batch_update",
+            json!({ "project_ids": [dragon, vase, "nope"], "add_tags": ["checked"] }),
+        );
+        assert_eq!(structured(&r)["updated"], 2);
+        let entry = journal(&engine).entries.remove(0);
+        assert_eq!(entry.tool, "batch_update");
+        assert_eq!(titles(&entry), ["Dragon", "Vase"]);
+        assert_eq!(entry.failed, 1);
+
+        // a rename gives the project a new id: the journal names it as it can be found now
+        structured(
+            &call(
+                &mut engine,
+                10,
+                "rename_project",
+                json!({ "project_id": vase, "new_name": "Tall Vase" }),
+            )
+            .0,
+        );
+        let entry = journal(&engine).entries.remove(0);
+        assert_eq!(
+            entry.projects,
+            [AuditProject {
+                id: format!("{}:Tall Vase", root.id),
+                title: "Tall Vase".into()
+            }]
+        );
+        assert_eq!(entry.args["new_name"], "Tall Vase");
+
+        // what a tool created is named from its result
+        let (r, _) = call(
+            &mut engine,
+            11,
+            "execute_import",
+            json!({ "root_id": root.id, "items": [{ "source": downloads.path().join("clip.stl"), "action": "project", "name": "Clip" }] }),
+        );
+        structured(&r);
+        let entry = journal(&engine).entries.remove(0);
+        assert_eq!(entry.tool, "execute_import");
+        assert_eq!(
+            entry.projects,
+            [AuditProject {
+                id: format!("{}:Clip", root.id),
+                title: "Clip".into()
+            }]
+        );
+
+        // a deleted project keeps the name it had
+        structured(&call(&mut engine, 12, "delete_project", json!({ "project_id": dragon })).0);
+        let page = journal(&engine);
+        assert_eq!(page.entries[0].tool, "delete_project");
+        assert_eq!(titles(&page.entries[0]), ["Dragon"]);
+        assert!(engine.get_project(&dragon).is_err());
+        // newest first, and the file is app data, not library content
+        let tools: Vec<&str> = page.entries.iter().map(|e| e.tool.as_str()).collect();
+        assert_eq!(
+            tools,
+            [
+                "delete_project",
+                "execute_import",
+                "rename_project",
+                "batch_update",
+                "update_metadata"
+            ]
+        );
+        assert!(data.path().join(crate::audit::AUDIT_FILE).is_file());
+
+        engine.clear_mcp_audit().unwrap();
+        assert_eq!(journal(&engine).total, 0);
+        assert!(
+            lib.path().join("Tall Vase/vase.stl").is_file(),
+            "clearing the history touches no library"
+        );
     }
 
     #[test]

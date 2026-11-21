@@ -1,4 +1,4 @@
-import type { EmbeddedPicture, AppInfo, PackProgress, PackReport, BatchReport, BatchUpdate, ConventionReport, ConventionsView, CreatorSuggestions, DuplicateReport, EnrichProgress, EnrichReport, Hints, McpSettings, McpStatus, NetworkSettings, PageSuggestion, HashProgress, MoveReport, PromoteItem, PromoteReport, Collection, Facets, ThumbLocation, UpdateInfo, FolderNode, ImportItem, ImportProgress, ImportReport, ImportRequest, InboxFile, LibraryChanged, LibraryRoot, LibraryStats, ListQuery, FileThumb, Project, ProjectSummary, ScanProgress, ScanReport, SmartCollection, SyncMode, TagCount, ThumbJob, ThumbStats, UpdateMetadata, AiSettings, AiSettingsView, AiTestReport, MetadataSuggestion } from '@/lib/types';
+import type { EmbeddedPicture, AppInfo, PackProgress, PackReport, BatchReport, BatchUpdate, ConventionReport, ConventionsView, CreatorSuggestions, DuplicateReport, EnrichProgress, EnrichReport, Hints, McpAuditPage, McpSettings, McpStatus, NetworkSettings, PageSuggestion, HashProgress, MoveReport, PromoteItem, PromoteReport, Collection, Facets, ThumbLocation, UpdateInfo, FolderNode, ImportItem, ImportProgress, ImportReport, ImportRequest, InboxFile, LibraryChanged, LibraryRoot, LibraryStats, ListQuery, FileThumb, Project, ProjectSummary, ScanProgress, ScanReport, SmartCollection, SyncMode, TagCount, ThumbJob, ThumbStats, UpdateMetadata, AiSettings, AiSettingsView, AiTestReport, MetadataSuggestion } from '@/lib/types';
 
 export type Unlisten = () => void;
 
@@ -119,6 +119,9 @@ export interface Backend {
   setMcpSettings(settings: McpSettings): Promise<McpSettings>;
   regenerateMcpToken(): Promise<McpSettings>;
   mcpStatus(): Promise<McpStatus>;
+  /** What agents changed over MCP, newest first, and forgetting that history (#103). */
+  mcpAudit(limit: number, offset: number): Promise<McpAuditPage>;
+  clearMcpAudit(): Promise<void>;
   /** Library conventions per root (#58): the YAML file, a starter text, and the deviations. */
   getConventions(rootId: string): Promise<ConventionsView>;
   setConventions(rootId: string, text: string): Promise<ConventionsView>;
