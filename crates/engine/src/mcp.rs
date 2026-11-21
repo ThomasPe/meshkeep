@@ -252,13 +252,10 @@ fn handle_one(engine: &mut Engine, message: &Value, session: &mut Session) -> Ou
                 let mut progress = Progress::new(progress_token(Some(&params)), notify);
                 // the journal names projects as they were before the call: ids change with a
                 // rename or a move, and a deleted project has no title afterwards
-                let named = if tool_kind(name) == ToolKind::Read {
-                    Vec::new()
-                } else {
-                    projects_named(engine, &args)
-                };
+                let writes = tool_kind(name) != ToolKind::Read;
+                let named = if writes { projects_named(engine, &args) } else { Vec::new() };
                 let result = call_tool(engine, name, &args, &mut changes, &mut progress);
-                if let (Ok(v), false, false) = (&result, changes.is_empty(), tool_kind(name) == ToolKind::Read) {
+                if let (Ok(v), true, false) = (&result, writes, changes.is_empty()) {
                     record_change(engine, name, &args, named, v);
                 }
                 result
