@@ -10,7 +10,7 @@
 //   site/assets/       website logo, favicon and touch icon
 //
 // Chromium (the Playwright one the UI tests use) rasterizes the SVG at the exact target size,
-// so no image library is needed. ICON_CHROMIUM overrides the browser binary.
+// so no image library is needed. CHROMIUM_PATH overrides the browser binary.
 import { chromium } from '@playwright/test';
 import { mkdirSync, readFileSync, readdirSync, rmSync, writeFileSync } from 'node:fs';
 import { dirname, join } from 'node:path';
@@ -26,7 +26,7 @@ const drawings = {
 /** The drawing for an icon whose artwork is `art` pixels wide. */
 const drawingFor = (art) => (art < 20 ? 'tiny' : art < 48 ? 'small' : 'detail');
 
-const browser = await chromium.launch({ executablePath: process.env.ICON_CHROMIUM || undefined });
+const browser = await chromium.launch({ executablePath: process.env.CHROMIUM_PATH || undefined });
 const page = await browser.newPage();
 
 /**

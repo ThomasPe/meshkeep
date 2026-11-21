@@ -183,9 +183,9 @@ Status: account created and the name **Meshkeep** reserved (2026-10-19); the dom
 - `runFullTrust` capability: the submission form asks for a reason. Text: "Desktop app
   that indexes user-selected folders of 3D model files; file access is limited to folders
   the user picks through the system dialog."
-- Screenshots: at least one 1366×768 or larger PNG per listing language; capture the
-  library grid with thumbnails, the project page with the 3D viewer, and the import
-  dialog.
+- Screenshots: at least one 1366×768 or larger PNG per listing language. Four per
+  language are in `docs/store/screenshots/`, taken by `npm run screenshots`; see
+  "Screenshots" in `docs/store/listing.md`.
 - Icons: see "Icons" below. The listing's own logos (1:1 at 1080×1080 or 2160×2160,
   optionally 2:3 at 720×1080) are uploaded in Partner Center and are not part of the
   package; without them the Store shows the package icon.

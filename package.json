@@ -16,6 +16,7 @@
     "test:ui": "playwright test -c tests/ui/playwright.config.ts",
     "test:e2e": "wdio run tests/e2e/wdio.conf.ts",
     "icons": "node scripts/generate-icons.mjs",
+    "screenshots": "vite build && node scripts/store-screenshots.mjs",
     "tauri": "tauri",
     "tauri:dev": "tauri dev",
     "tauri:build": "tauri build --no-bundle",
