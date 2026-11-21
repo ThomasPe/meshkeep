@@ -296,3 +296,66 @@ fn serves_mcp_over_http_with_a_token() {
     let down = meshkeep_lib::mcp_bridge::forward(&bridge, &url, "secret-token", r#"{"jsonrpc":"2.0","id":8,"method":"ping"}"#).unwrap();
     assert!(down.contains("not running"), "{down}");
 }
+
+/// Changing a switch, replacing the token or turning the server off and on must not cost
+/// the port: the old listener lets go of it a moment after `stop`, so a restart on the same
+/// port right away found it taken ("Address already in use") and the server stayed down.
+#[test]
+fn a_settings_change_keeps_the_server_reachable() {
+    let data = tempfile::tempdir().unwrap();
+    let engine = Arc::new(Mutex::new(Engine::open(data.path()).unwrap()));
+    let hooks = || Hooks::changes_only(Arc::new(|_| {}));
+    let port = std::net::TcpListener::bind("127.0.0.1:0").unwrap().local_addr().unwrap().port();
+    let url = format!("http://127.0.0.1:{port}/mcp");
+    let ping = |token: &str| {
+        reqwest::blocking::Client::new()
+            .post(&url)
+            .header("Authorization", format!("Bearer {token}"))
+            .header("Connection", "close")
+            .body(r#"{"jsonrpc":"2.0","id":1,"method":"ping"}"#)
+            .send()
+            .map(|r| r.status().as_u16())
+            .map_err(|e| e.to_string())
+    };
+    let mut settings = McpSettings {
+        enabled: true,
+        port,
+        token: "one".into(),
+        ..Default::default()
+    };
+    let host = Host::new();
+    host.apply(&settings, engine.clone(), hooks());
+    assert_eq!(host.status(port).error, None);
+    assert_eq!(ping("one"), Ok(200));
+
+    // a switch changes while the server runs
+    settings.allow_writes = true;
+    host.apply(&settings, engine.clone(), hooks());
+    assert_eq!(host.status(port).error, None);
+    assert!(host.status(port).running);
+    assert_eq!(ping("one"), Ok(200));
+
+    // a new token replaces the old one at once
+    settings.token = "two".into();
+    host.apply(&settings, engine.clone(), hooks());
+    assert_eq!(host.status(port).error, None);
+    assert_eq!(ping("one"), Ok(401));
+    assert_eq!(ping("two"), Ok(200));
+
+    // off, and on again on the same port
+    settings.enabled = false;
+    host.apply(&settings, engine.clone(), hooks());
+    assert!(!host.status(port).running);
+    settings.enabled = true;
+    host.apply(&settings, engine.clone(), hooks());
+    assert_eq!(host.status(port).error, None);
+    assert!(host.status(port).running);
+    assert_eq!(ping("two"), Ok(200));
+
+    // another port moves the server
+    let other = std::net::TcpListener::bind("127.0.0.1:0").unwrap().local_addr().unwrap().port();
+    settings.port = other;
+    host.apply(&settings, engine.clone(), hooks());
+    assert_eq!(host.status(port).error, None);
+    assert_eq!(host.status(port).port, other);
+}

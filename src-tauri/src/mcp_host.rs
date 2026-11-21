@@ -56,6 +56,9 @@ struct Running {
     server: Arc<Server>,
     thread: Option<JoinHandle<()>>,
     port: u16,
+    /// The token requests are checked against; replaced in place when the user asks for a
+    /// new one, so that does not take the server down.
+    token: Arc<Mutex<String>>,
 }
 
 impl Drop for Running {
@@ -79,10 +82,30 @@ pub struct McpStatus {
     pub last_request_at: Option<String>,
 }
 
+/// How long a port this host just gave up is retried before "address in use" is believed.
+const REBIND_FOR: std::time::Duration = std::time::Duration::from_secs(2);
+
+/// Binds the listener. With `patient`, a failure is retried for `REBIND_FOR`: the HTTP
+/// library closes a stopped server's socket on its own thread, a moment after `stop`.
+fn listen(addr: &str, patient: bool) -> Result<Server, String> {
+    let began = std::time::Instant::now();
+    loop {
+        match Server::http(addr) {
+            Ok(server) => return Ok(server),
+            Err(e) if patient && began.elapsed() < REBIND_FOR => {
+                log::debug!("MCP server: {addr} not free yet ({e}), trying again");
+                std::thread::sleep(std::time::Duration::from_millis(50));
+            }
+            Err(e) => return Err(e.to_string()),
+        }
+    }
+}
+
 /// Owns the server thread; `apply` makes it match the settings.
 #[derive(Default)]
 pub struct Host {
     running: Mutex<Option<Running>>,
+    stopped_at: Mutex<Option<std::time::Instant>>,
     error: Mutex<Option<String>>,
     stats: Arc<Stats>,
 }
@@ -95,15 +118,21 @@ impl Host {
     /// Starts on `addr` ("127.0.0.1:0" picks a free port) and returns the port in use.
     pub fn start(&self, addr: &str, token: String, engine: Arc<Mutex<Engine>>, hooks: Hooks) -> Result<u16, String> {
         self.stop();
-        let server = Server::http(addr).map_err(|e| format!("cannot listen on {addr}: {e}"))?;
+        // a server of ours stopped a moment ago (off and on again, a restart) may still hold
+        // the port: its listener closes shortly after it was told to
+        let patient = self.stopped_at.lock().unwrap().is_some_and(|t| t.elapsed() < REBIND_FOR);
+        let server = listen(addr, patient).map_err(|e| format!("cannot listen on {addr}: {e}"))?;
         let port = server.server_addr().to_ip().map(|a| a.port()).unwrap_or(0);
         let server = Arc::new(server);
         let stats = self.stats.clone();
         let srv = server.clone();
+        let token = Arc::new(Mutex::new(token));
+        let current = token.clone();
         let thread = std::thread::Builder::new()
             .name("meshkeep-mcp".into())
             .spawn(move || {
                 while let Ok(req) = srv.recv() {
+                    let token = current.lock().unwrap().clone();
                     serve(req, &token, &engine, &hooks, &stats);
                 }
             })
@@ -112,6 +141,7 @@ impl Host {
             server,
             thread: Some(thread),
             port,
+            token,
         });
         *self.error.lock().unwrap() = None;
         log::info!("MCP server listening on 127.0.0.1:{port}");
@@ -122,14 +152,26 @@ impl Host {
         if let Some(r) = self.running.lock().unwrap().take() {
             log::info!("MCP server on port {} stopped", r.port);
             drop(r);
+            *self.stopped_at.lock().unwrap() = Some(std::time::Instant::now());
         }
     }
 
-    /// Starts, stops or restarts so the server matches the settings; a failure to bind is
+    /// Starts, stops or moves the server so it matches the settings; a failure to bind is
     /// kept for the status line instead of failing the settings change.
+    ///
+    /// A server already listening on the configured port stays up: the switches are read
+    /// from the engine with every request and a new token is swapped in, so nothing a
+    /// settings change brings needs a restart except another port. Restarting on the same
+    /// port would also race the old listener, which lets go of it only a moment after it
+    /// was told to stop.
     pub fn apply(&self, settings: &meshkeep_engine::settings::McpSettings, engine: Arc<Mutex<Engine>>, hooks: Hooks) {
         if !settings.enabled || settings.token.is_empty() {
             self.stop();
+            *self.error.lock().unwrap() = None;
+            return;
+        }
+        if let Some(r) = self.running.lock().unwrap().as_ref().filter(|r| r.port == settings.port) {
+            *r.token.lock().unwrap() = settings.token.clone();
             *self.error.lock().unwrap() = None;
             return;
         }

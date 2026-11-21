@@ -230,3 +230,18 @@ sent.
   form undo can attach to: when APP-6 defines inverse operations, an entry here is where
   an agent's change gets its "take back". Until then the card says that it cannot take a
   change back and where a deleted file went (the trash).
+
+## Amendment 2026-11-21: a settings change keeps the server up
+
+The host restarted the server for every change of the MCP settings. The switches never
+needed that (the engine reads them with every request), and the restart raced the old
+listener, which the HTTP library closes on its own thread a moment after it is told to
+stop: binding the same port again right away failed with "address in use", and the server
+stayed down until the next change. Found by the real-app test of the amendments above,
+where "Allow writes" took the server away.
+
+Now a server that already listens on the configured port stays up; a new token is swapped
+in place and holds from the next request. Only another port moves the server, and a start
+on a port this host gave up within the last two seconds (off and on again) retries until
+the old listener is gone. With no restart on a switch, the kept-alive connection named
+under "Consequences" only matters when the server is stopped or moved.
