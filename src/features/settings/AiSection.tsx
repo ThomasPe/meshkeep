@@ -4,11 +4,12 @@ import { useTranslation } from 'react-i18next';
 import { toast } from 'sonner';
 import { Button } from '@/components/ui/button';
 import { Input } from '@/components/ui/input';
+import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from '@/components/ui/select';
 import { Switch } from '@/components/ui/switch';
 import { getBackend } from '@/lib/backend';
 import { reportError } from '@/lib/errors';
 import { useAiSettings, useNetworkSettings, useSetNetworkSettings, useSetAiKey, useSetAiSettings } from '@/lib/queries';
-import { isAppError, type AiTestReport } from '@/lib/types';
+import { AI_PROVIDERS, isAppError, type AiProviderKind, type AiTestReport } from '@/lib/types';
 import { Card, Row } from './Card';
 
 /** Settings › AI & network: the two opt-in features that send something off this machine. */
@@ -22,8 +23,9 @@ export function AiSection() {
 }
 
 /**
- * AI assistance (ADR-0003, Epic 9): endpoint and model go to settings.json, the key to the OS
- * credential store, and the card says in plain words what a suggestion sends.
+ * AI assistance (ADR-0003, Epic 9): provider, endpoint and model go to settings.json, the key
+ * to the OS credential store (one per provider), and the card says in plain words what a
+ * suggestion sends.
  */
 function AiCard() {
   const { t } = useTranslation();
@@ -37,8 +39,16 @@ function AiCard() {
   const curBase = baseUrl ?? ai.data?.base_url ?? '';
   const curModel = model ?? ai.data?.model ?? '';
   const dirty = !!ai.data && (curBase !== (ai.data.base_url ?? '') || curModel !== ai.data.model);
-  const save = () => setSettings.mutate({ provider: 'anthropic', base_url: curBase.trim() || null, model: curModel }, {
+  const provider = ai.data?.provider ?? 'anthropic';
+  const providerName = t(`settings.aiProviders.${provider}`);
+  const save = () => setSettings.mutate({ provider, base_url: curBase.trim() || null, model: curModel }, {
     onSuccess: () => { setBaseUrl(null); setModel(null); toast.success(t('settings.aiSaved')); },
+    onError: reportError,
+  });
+  // another provider is another service: its own endpoint, its default model (an empty model
+  // is filled in by the engine) and its own key, so nothing typed for the old one carries over
+  const switchProvider = (next: AiProviderKind) => setSettings.mutate({ provider: next, base_url: null, model: '' }, {
+    onSuccess: () => { setBaseUrl(null); setModel(null); setKeyInput(''); setTest({ state: 'idle' }); toast.success(t('settings.aiSaved')); },
     onError: reportError,
   });
   const saveKey = () => setKey.mutate(key, { onSuccess: () => { setKeyInput(''); setTest({ state: 'idle' }); toast.success(t('settings.aiKeySaved')); }, onError: reportError });
@@ -49,10 +59,20 @@ function AiCard() {
   };
   return (
     <Card title={t('settings.ai')} hint={t('settings.aiHint')} action={<Button size="sm" variant="outline" disabled={!ai.data?.hasKey || test.state === 'testing'} onClick={() => void runTest()} data-testid="ai-test"><Sparkles />{test.state === 'testing' ? t('settings.aiTesting') : t('settings.aiTest')}</Button>}>
-      <Row label={t('settings.aiProvider')}><span className="text-sm font-semibold text-secondary-foreground">{t('settings.aiProviderAnthropic')}</span></Row>
+      <Row label={t('settings.aiProvider')}>
+        <div className="grid w-full max-w-md justify-items-end gap-1">
+          <Select value={provider} onValueChange={(v) => switchProvider(v as AiProviderKind)} disabled={!ai.data || setSettings.isPending}>
+            <SelectTrigger size="sm" data-testid="ai-provider" data-provider={provider} aria-label={t('settings.aiProvider')}><SelectValue /></SelectTrigger>
+            <SelectContent>
+              {AI_PROVIDERS.map((p) => <SelectItem key={p} value={p} data-testid={`ai-provider-${p}`}>{t(`settings.aiProviders.${p}`)}</SelectItem>)}
+            </SelectContent>
+          </Select>
+          <span className="text-right text-xs text-muted-foreground">{t('settings.aiProviderHint')}</span>
+        </div>
+      </Row>
       <Row label={t('settings.aiBaseUrl')}>
         <div className="grid w-full max-w-md justify-items-end gap-1">
-          <Input value={curBase} placeholder="https://api.anthropic.com" className="h-8 w-full font-mono text-xs" onChange={(e) => setBaseUrl(e.target.value)} data-testid="ai-base-url" />
+          <Input value={curBase} placeholder={ai.data?.defaultBaseUrl ?? ''} className="h-8 w-full font-mono text-xs" onChange={(e) => setBaseUrl(e.target.value)} data-testid="ai-base-url" />
           <span className="text-right text-xs text-muted-foreground">{t('settings.aiBaseUrlHint')}</span>
         </div>
       </Row>
@@ -64,7 +84,7 @@ function AiCard() {
       </Row>
       <Row label={t('settings.aiKey')}>
         <div className="grid w-full max-w-md justify-items-end gap-1.5">
-          <div className="flex items-center gap-1.5 text-xs font-semibold" data-testid="ai-key-status" data-state={ai.data?.hasKey ? 'stored' : 'missing'}><KeyRound className={ai.data?.hasKey ? 'size-3.5 text-success' : 'size-3.5 text-muted-foreground'} />{ai.data?.hasKey ? t('settings.aiKeyStored') : t('settings.aiKeyMissing')}</div>
+          <div className="flex items-center gap-1.5 text-xs font-semibold" data-testid="ai-key-status" data-state={ai.data?.hasKey ? 'stored' : 'missing'}><KeyRound className={ai.data?.hasKey ? 'size-3.5 text-success' : 'size-3.5 text-muted-foreground'} />{ai.data?.hasKey ? t('settings.aiKeyStored', { provider: providerName }) : t('settings.aiKeyMissing', { provider: providerName })}</div>
           <form className="flex w-full items-center gap-2" onSubmit={(e) => { e.preventDefault(); if (key.trim()) saveKey(); }}>
             <Input type="password" autoComplete="off" value={key} placeholder={t('settings.aiKeyPlaceholder')} className="h-8 font-mono text-xs" onChange={(e) => setKeyInput(e.target.value)} data-testid="ai-key" />
             <Button type="submit" size="sm" disabled={!key.trim() || setKey.isPending} data-testid="ai-key-save">{t('settings.aiKeySave')}</Button>

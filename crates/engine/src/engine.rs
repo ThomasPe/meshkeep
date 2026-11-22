@@ -949,13 +949,14 @@ impl Engine {
     }
 
     /// The provider for one call. `AiDisabled` without a key, whatever provider is installed:
-    /// that is the "no key, no network" rule (spec 04-quality) in one place.
+    /// that is the "no key, no network" rule (spec 04-quality) in one place. The key must be
+    /// the one stored for the configured service (`ai_settings().provider`).
     pub fn ai_provider(&self, api_key: Option<&str>) -> Result<SharedProvider> {
         let key = api_key.map(str::trim).filter(|k| !k.is_empty()).ok_or(EngineError::AiDisabled)?;
         if let Some(p) = &self.ai_override {
             return Ok(p.clone());
         }
-        Ok(Arc::new(ai::AnthropicProvider::new(self.ai_settings(), key)?))
+        ai::provider_for(self.ai_settings(), key)
     }
 
     /// Collects the inputs for a suggestion (thumbnail, file list, README text, sidecar, tag
@@ -971,7 +972,7 @@ impl Engine {
             &dir,
             thumb.as_deref(),
             &vocab,
-            &self.ai_settings().model,
+            self.ai_settings().effective_model(),
             &|f| {
                 located_in(&p, &dir, &f.rel_path)
                     .read_head(256 << 10)

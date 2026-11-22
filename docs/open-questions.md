@@ -30,7 +30,7 @@ file keeps the record of what was decided and when.
 | Q23 | Rust to TypeScript types | Hand-mirrored for now; generated types come as a change of their own (#109), since 2026-11-20. Was: switch to `tauri-specta` with the next API extension (2026-10-18), which no extension did. | `AGENTS.md` Conventions |
 | Q24 | AI tag vocabulary | **Open**: suggestions may introduce new tags; the dialog marks new ones visibly and the user unticks what they do not want (2026-10-22). | `decisions/0003-ai-integration.md` |
 | Q25 | Rejected AI suggestions | **Forgotten**: no per-project memory of rejections; the response cache keyed by input hash avoids repeat cost (2026-10-22). | `decisions/0003-ai-integration.md` |
-| Q26 | Local AI provider | **Later**: the first slice ships the hosted client only, but the settings model carries a base URL from the start so a local OpenAI-compatible server is a configuration, not a new client (2026-10-22). | `decisions/0003-ai-integration.md` |
+| Q26 | Local AI provider | **Later**: the first slice ships the hosted client only, but the settings model carries a base URL from the start so a local OpenAI-compatible server is a configuration, not a new client (2026-10-22). The OpenAI client that makes it one came with the provider choice (2026-11-22): provider OpenAI plus the server's address as the endpoint; an own entry for it without a key is still open. | `decisions/0003-ai-integration.md` |
 
 ## Open
 

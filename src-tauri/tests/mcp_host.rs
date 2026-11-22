@@ -30,7 +30,7 @@ fn serves_mcp_over_http_with_a_token() {
             engine.clone(),
             Hooks {
                 on_change: Arc::new(move |changes| *counter.lock().unwrap() += changes.len()),
-                ai_key: Arc::new(move || {
+                ai_key: Arc::new(move |_| {
                     *asked.lock().unwrap() += 1;
                     Ok(Some("sk-test".into()))
                 }),

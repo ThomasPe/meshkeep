@@ -9,7 +9,8 @@ are binding. This file is the operating manual.
 - **Engine:** `crates/engine` (`meshkeep-engine`), shell-agnostic. Scanner, sidecars, SQLite
   index with FTS5, watcher, hashing, 3MF inspection, thumbnail cache bookkeeping, favorites
   (`collections.json`), rename and trash-delete, AI metadata suggestions (`ai.rs`: provider
-  trait, Anthropic client over reqwest, mock, response cache). No Tauri imports allowed here.
+  trait, Anthropic, OpenAI and Gemini clients over reqwest, mock, response cache). No Tauri
+  imports allowed here.
 - **Frontend:** React 19 + TypeScript + Vite 7, Tailwind CSS 4, shadcn-style components in
   `src/components/ui` (copied source, Radix primitives), TanStack Query + Virtual, zustand,
   i18next, Three.js. Visual direction D "Gallery" (ADR-0002); tokens in `src/styles/globals.css`.
@@ -63,7 +64,8 @@ merged. `docs/store/README.md` has the whole pipeline.
    keyed per project + source file, invalidated by source size/mtime (see
    `docs/spec/02-domain-model.md`). The frontend reads them through `read_thumbnail` only.
 11. **AI assistance is opt-in and never writes** (ADR-0003). No request leaves the machine
-   without a key; the key lives in the OS credential store (`src-tauri/src/keys.rs`), never in
+   without a key; the key lives in the OS credential store (`src-tauri/src/keys.rs`, one
+   entry per provider, and a call only ever gets the configured provider's), never in
    `settings.json`, logs or the feedback excerpt. Only the thumbnail PNG, file names and sizes,
    README/license text and the current sidecar are sent, never model geometry. The engine
    validates the JSON answer; the user ticks fields in a dialog and the result goes through

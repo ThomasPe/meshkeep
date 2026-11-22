@@ -95,7 +95,7 @@ pub fn apply_mcp_settings(app: &AppHandle) {
     let progress_handle = app.clone();
     let hooks = crate::mcp_host::Hooks {
         on_change,
-        ai_key: Arc::new(move || keys.state::<AppState>().ai_keys.get()),
+        ai_key: Arc::new(move |provider| keys.state::<AppState>().ai_keys.get(provider)),
         on_import: Arc::new(move |p| {
             let _ = progress_handle.emit("import://progress", &p);
         }),
