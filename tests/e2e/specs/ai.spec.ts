@@ -4,8 +4,8 @@ import fs from 'node:fs';
 import path from 'node:path';
 
 // AI assistance (ADR-0003, Epic 9) against the real app in test mode with MESHKEEP_AI_MOCK=ok:
-// no call without a key, the key never lands in settings.json, and an applied suggestion is
-// written through the normal sidecar save.
+// no call without a key, the key never lands in settings.json, every provider has its own
+// key, and an applied suggestion is written through the normal sidecar save.
 describe('Meshkeep AI assistance (mock provider)', () => {
   const dataDir = () => process.env.MESHKEEP_E2E_DATA_DIR!;
   const fixture = () => process.env.MESHKEEP_E2E_FIXTURE!;
@@ -41,6 +41,31 @@ describe('Meshkeep AI assistance (mock provider)', () => {
     expect(text).toContain('e2e-model');
     expect(text).not.toContain(KEY);
     expect(text.toLowerCase()).not.toContain('sk-ant');
+
+    // every provider has its own key: with OpenAI or Gemini configured, the key stored for
+    // Anthropic is not theirs, so no request is made until they get one
+    type View = { provider: string; model: string; hasKey: boolean; defaultBaseUrl: string };
+    const configure = (settings: { provider: string; base_url: string | null; model: string }) =>
+      browser.tauri.execute(({ core }, s) => core.invoke('set_ai_settings', { settings: s }), settings) as Promise<View>;
+    const testAi = () => browser.tauri.execute(({ core }) => core.invoke('test_ai').then(() => 'ok', (e: { code: string }) => e.code));
+    const openai = await configure({ provider: 'openai', base_url: null, model: '' });
+    expect(openai).toMatchObject({ provider: 'openai', model: 'gpt-6-luna', hasKey: false, defaultBaseUrl: 'https://api.openai.com' });
+    expect(await testAi()).toBe('ai_disabled');
+    expect(fs.readFileSync(settingsFile, 'utf8')).toContain('"provider": "openai"');
+    expect(await browser.tauri.execute(({ core }) => core.invoke('set_ai_key', { key: 'sk-openai-e2e-key' }))).toBe(true);
+    expect(await testAi()).toBe('ok');
+    const gemini = await configure({ provider: 'gemini', base_url: null, model: '' });
+    expect(gemini).toMatchObject({ provider: 'gemini', model: 'gemini-3.5-flash-lite', hasKey: false });
+    expect(await testAi()).toBe('ai_disabled');
+    // removing the OpenAI key leaves the first one where it was
+    await configure({ provider: 'openai', base_url: null, model: '' });
+    expect(await browser.tauri.execute(({ core }) => core.invoke('set_ai_key', { key: null }))).toBe(false);
+    const back = await configure({ provider: 'anthropic', base_url: null, model: 'e2e-model' });
+    expect(back).toMatchObject({ provider: 'anthropic', model: 'e2e-model', hasKey: true });
+    expect(await testAi()).toBe('ok');
+    const after = fs.readFileSync(settingsFile, 'utf8');
+    expect(after).not.toContain(KEY);
+    expect(after).not.toContain('sk-openai');
   });
 
   it('applies a suggestion through the sidecar save and writes project.yaml', async () => {

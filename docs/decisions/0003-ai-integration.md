@@ -96,6 +96,32 @@ Notes per feature:
 Recommendation: **B, designed so that C is a configuration (base URL) rather than a new
 client.** A key is optional when the base URL is local.
 
+Built 2026-11-22 as B with three clients behind the trait, chosen in the settings card:
+
+| Provider | API | Default model | Key travels as |
+|---|---|---|---|
+| Anthropic | Messages (`/v1/messages`), `output_config.format` | `claude-haiku-5-5` | `x-api-key` header |
+| OpenAI | Chat Completions (`/v1/chat/completions`), strict `response_format` | `gpt-6-luna` | `Authorization: Bearer` |
+| Google Gemini | `models/<model>:generateContent`, `responseJsonSchema` | `gemini-3.5-flash-lite` | `x-goog-api-key` header |
+
+- **One key per provider.** The credential store holds an entry for each provider, and a
+  call gets the key of the configured one only. A key is never sent to a service it was
+  not stored for, so switching the provider can leave the old key where it is.
+- **Switching resets endpoint and model** to the new provider's defaults: a base URL or a
+  model name of one service means nothing to another.
+- **Chat Completions rather than the Responses API** for OpenAI, because that is the
+  dialect other services and local servers speak. An endpoint with a path is taken as the
+  API root, as the OpenAI SDKs do (`http://localhost:11434/v1`); a bare origin gets `/v1`.
+  The "no key, no request" rule still holds, so a local server needs any non-empty key.
+- **Gemini natively rather than through its OpenAI-compatible layer**, which is still
+  marked beta; the native API reports blocked prompts and thinking parts in a way the
+  client can tell apart from an answer.
+- **One schema for all three.** Every object is closed and requires all its properties,
+  optional fields are nullable; that is what OpenAI's strict mode demands and the other
+  two accept. A unit test holds the schema to it.
+- The hint to think little (`effort`, `reasoning_effort`, `thinkingLevel`) keeps cost
+  down; a model or server that refuses the field is asked once more without it.
+
 ## Recommended first slice
 
 Build feature **1 (metadata suggestions)** with the plumbing every later feature reuses

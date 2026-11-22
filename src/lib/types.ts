@@ -339,7 +339,9 @@ export interface AppError {
 
 // ---- AI assistance (ADR-0003); mirrors crates/engine/src/ai.rs ------------------------------
 
-export type AiProviderKind = 'anthropic';
+/** The services the engine has a client for; each one has its own endpoint, default model and key. */
+export type AiProviderKind = 'anthropic' | 'openai' | 'gemini';
+export const AI_PROVIDERS: AiProviderKind[] = ['anthropic', 'openai', 'gemini'];
 
 /** The `ai` block of settings.json: endpoint and model, never the key. */
 /** Opt-in network features (META-7 stage 2); each one is listed in the privacy policy. */
@@ -360,13 +362,17 @@ export interface McpStatus { running: boolean; port: number; error: string | nul
 
 export interface AiSettings {
   provider: AiProviderKind;
+  /** `null` means the provider's own endpoint. */
   base_url: string | null;
+  /** Saved empty, it becomes the provider's default model. */
   model: string;
 }
 
-/** `AiSettings` plus whether a key is stored; the key itself never comes back over IPC. */
+/** `AiSettings` plus whether a key is stored for its provider; the key itself never comes back over IPC. */
 export interface AiSettingsView extends AiSettings {
   hasKey: boolean;
+  /** The provider's own endpoint, used when `base_url` is null. */
+  defaultBaseUrl: string;
 }
 
 export interface AiTestReport {
