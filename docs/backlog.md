@@ -162,9 +162,9 @@ submission is outside the code: Partner Center identity values, screenshots
       `packed` for zips (remembered toggle in the dialog), "Pack"/"Unpack" for one project or a
       selection with a progress toast, "open with default app" via a cache copy, MCP
       `pack_projects`/`unpack_projects` and `execute_import` with `packed`. The import's
-      default archive policy is now the trash (Q7). Not yet: packing other files than models,
-      re-using an original archive kept in a project instead of compressing again, progress
-      for MCP clients.
+      default archive policy is now the trash (Q7). MCP clients see progress (#102). Not
+      yet: packing other files than models, re-using an original archive kept in a project
+      instead of compressing again.
 - [x] **Duplicate detection** (LIB-8): size pre-filter, SHA-256 on all cores, hash cache in
       the index (schema v4, survives rescans and renames), identical/overlap groups, Duplicates
       view in the sidebar with keep-one resolution and automatic refresh after changes.
@@ -202,7 +202,8 @@ submission is outside the code: Partner Center identity values, screenshots
 - [ ] **Project tabs** (NAV-9).
 - [ ] **Dashboard** (NAV-10).
 - [ ] **Keymap** (APP-5).
-- [ ] **Undo/redo** (APP-6).
+- [ ] **Undo/redo** (APP-6). The journal of agent changes (#103) is where an agent's
+      change should get its "take back".
 - [ ] **Log viewer** (APP-8). Export is done: the Diagnostics card in Settings writes a zip
       (log files, `settings.json` and `roots.json` without secrets and with user folders
       shortened, environment block, data-dir listing) into a folder the user picks, and
@@ -279,10 +280,29 @@ cost estimate, import proposals in the staging dialog (see ADR-0003, features 4,
       every write; MCP `initialize` carries the rules, `get_conventions`, `check_conventions`,
       `organize`. Not yet: the import dialog proposing the destination from the layout, an
       "Organize" button in the window, more placeholders.
-- [ ] **Follow-ups.** Resources (`meshkeep://project/{id}`) for clients that browse;
-      a tool for the in-app AI suggestion so an agent without its own eyes can use the
-      thumbnail; progress notifications for long tools (duplicates, imports with pages);
-      an audit view of what agents changed (reuse the undo log once APP-6 exists).
+- [x] **Resources for clients that browse** (#100, ADR-0004 amendment). Every project is
+      `meshkeep://project/{id}` (the JSON of `get_project`), with its text files
+      (`…/file/{+path}`) and its preview (`…/thumbnail`, PNG) below it; `resources/list`
+      pages by title, `resources/templates/list`, `resources/read`. Read-only, no
+      subscriptions.
+- [x] **The in-app AI suggestion as a tool** (#101, ADR-0004 amendment). `suggest_metadata`
+      behind a switch of its own ("Allow AI suggestions", off by default): the assistant
+      of ADR-0003 looks at the preview, file names and readme for an agent that cannot,
+      with the user's key, under the same rules (no key no request, documented inputs
+      only, validated, cached, never written). The provider call runs outside the engine
+      lock.
+- [x] **Progress for long tools** (#102, ADR-0004 amendment). A `tools/call` with a
+      progress token gets `notifications/progress` from `find_duplicates` (and the tools
+      that hash on the way), `execute_import`, `pack_projects`, `unpack_projects` and
+      `scan_root`. Over HTTP the answer to such a call is an event stream on the same
+      POST (for clients that accept one), over the stdio bridge one line per message.
+- [x] **A view of what agents changed** (#103, ADR-0004 amendment). Settings → "What
+      agents changed": every writing or deleting tool call that changed something, newest
+      first, with tool, time, projects (links) and the arguments; a journal in app data
+      (`mcp-audit.jsonl`), trimmed and clearable. A record only: taking a change back
+      from there waits for APP-6.
+- [ ] **Follow-ups.** Take an agent's change back from the journal (with the undo log of
+      APP-6); cancelling a running tool.
 
 ## Phase 3: Model tools
 - [ ] **Transforms & mesh analysis** (VIEW-7).

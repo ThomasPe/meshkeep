@@ -165,7 +165,9 @@ user applies them.
 > 3. MCP server (Settings → AI agents). A local endpoint on 127.0.0.1, protected by a
 >    token, for AI programs on the same computer. The package registers the app execution
 >    alias meshkeep.exe so that such a program can start the app's stdio bridge
->    ("meshkeep.exe --mcp"); started that way the app shows no window.
+>    ("meshkeep.exe --mcp"); started that way the app shows no window. A separate switch,
+>    off by default, lets such a program request feature 1 for a project; the request
+>    then goes to the user's AI provider with the user's key.
 
 ## Screenshots
 

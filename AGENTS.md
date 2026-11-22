@@ -68,6 +68,8 @@ merged. `docs/store/README.md` has the whole pipeline.
    README/license text and the current sidecar are sent, never model geometry. The engine
    validates the JSON answer; the user ticks fields in a dialog and the result goes through
    the normal sidecar save with its stamp. Answers are a cache (`<data dir>/ai-cache/`).
+   The MCP tool `suggest_metadata` is the same call for an agent, behind its own switch
+   (`allow_ai`); it returns the proposal and writes nothing.
 
 ## Definition of done for a backlog item
 
@@ -101,13 +103,17 @@ only way evidence travels. In test mode `MESHKEEP_PICK_SAVE_DIR` answers its fol
 `meshkeep --mcp [url] [token]` runs no window: it is the stdio MCP bridge that forwards
 each line on stdin to the running app's endpoint (default `http://127.0.0.1:7340/mcp`)
 and prints the answer (ADR-0004). Nothing but protocol lines may go to stdout in that
-mode. In an MSIX install clients start it through the app execution alias `meshkeep.exe`
+mode; a long tool's progress reaches the client as `notifications/progress` lines, which
+the endpoint streams to the bridge as server-sent events (a tool that takes long reports
+through the `Progress` it is handed in `mcp.rs`). In an MSIX install clients start it through the app execution alias `meshkeep.exe`
 (`msix/AppxManifest.xml`), the only path that survives a Store update; Settings picks the
 command with `mcp_bridge::client_command`. The endpoint itself lives in
 `src-tauri/src/mcp_host.rs`; the tools in
 `crates/engine/src/mcp.rs`, where every new tool needs a test and, if it writes, the
 `allow_writes` gate (deleting tools the `allow_deletes` gate on top, trash only, with
-`dry_run`). Library conventions (`crates/engine/src/conventions.rs`) are per root in
+`dry_run`). A writing tool belongs in `is_write_tool`: that is what gates it and what puts
+its calls into the journal the window shows (`audit.rs`, `<data dir>/mcp-audit.jsonl`);
+it reports what it changed through `changes` and names the projects in its result. Library conventions (`crates/engine/src/conventions.rs`) are per root in
 `.meshkeep/conventions.yaml`; a rule the engine enforces belongs in `check_conventions`.
 
 A project file is not always a file on disk: in a packed project (LIB-9) it is an entry of
@@ -155,6 +161,7 @@ swaps the test library for the sample library of the Store and website screensho
 | Spec, backlog, ADRs | `docs/` |
 | Engine | `crates/engine/src/{scan,sidecar,index,watch,roots,collections,settings,import,threemf,thumbs,engine}.rs` |
 | Import staging, inbox, collections UI | `src/features/import/`, `src/features/library/{InboxView,CollectionDialogs}.tsx` |
+| MCP server | `crates/engine/src/{mcp,audit}.rs`, `src-tauri/src/{mcp_host,mcp_bridge}.rs`, `McpCard` and `McpAuditCard` in `src/features/settings/SettingsPage.tsx` |
 | AI assistance | `crates/engine/src/ai.rs`, `src-tauri/src/keys.rs`, `src/features/library/SuggestDialog.tsx`, `AiCard` in `src/features/settings/SettingsPage.tsx` |
 | MSIX packaging, Store docs | `msix/`, `docs/store/` |
 | Icon drawings and generator (`npm run icons`) | `src/assets/brand/`, `scripts/generate-icons.mjs` |

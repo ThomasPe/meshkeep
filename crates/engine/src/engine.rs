@@ -905,6 +905,16 @@ impl Engine {
         Ok(self.mcp_settings())
     }
 
+    /// What agents changed over MCP, newest first (#103).
+    pub fn mcp_audit(&self, limit: u32, offset: u32) -> Result<crate::audit::AuditPage> {
+        crate::audit::read(&self.data_dir, limit, offset)
+    }
+
+    /// Forgets that history; the libraries are not touched.
+    pub fn clear_mcp_audit(&mut self) -> Result<()> {
+        crate::audit::clear(&self.data_dir)
+    }
+
     /// A fresh token; clients configured with the old one stop working at once.
     pub fn regenerate_mcp_token(&mut self) -> Result<McpSettings> {
         let token = new_mcp_token();
