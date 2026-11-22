@@ -161,11 +161,12 @@ swaps the test library for the sample library of the Store and website screensho
 | Spec, backlog, ADRs | `docs/` |
 | Engine | `crates/engine/src/{scan,sidecar,index,watch,roots,collections,settings,import,threemf,thumbs,engine}.rs` |
 | Import staging, inbox, collections UI | `src/features/import/`, `src/features/library/{InboxView,CollectionDialogs}.tsx` |
-| MCP server | `crates/engine/src/{mcp,audit}.rs`, `src-tauri/src/{mcp_host,mcp_bridge}.rs`, `McpCard` and `McpAuditCard` in `src/features/settings/SettingsPage.tsx` |
-| AI assistance | `crates/engine/src/ai.rs`, `src-tauri/src/keys.rs`, `src/features/library/SuggestDialog.tsx`, `AiCard` in `src/features/settings/SettingsPage.tsx` |
+| MCP server | `crates/engine/src/{mcp,audit}.rs`, `src-tauri/src/{mcp_host,mcp_bridge}.rs`, `McpCard` and `McpAuditCard` in `src/features/settings/McpSection.tsx` |
+| AI assistance | `crates/engine/src/ai.rs`, `src-tauri/src/keys.rs`, `src/features/library/SuggestDialog.tsx`, `AiCard` in `src/features/settings/AiSection.tsx` |
 | MSIX packaging, Store docs | `msix/`, `docs/store/` |
 | Icon drawings and generator (`npm run icons`) | `src/assets/brand/`, `scripts/generate-icons.mjs` |
 | Store and website screenshots (`npm run screenshots`), showcase library | `scripts/store-screenshots.mjs`, `src/lib/backend/showcase.ts`, `docs/store/screenshots/` |
+| Settings screen | `src/features/settings/SettingsPage.tsx` (navigation of areas), one `*Section.tsx` per area; the areas and their addresses (`#/settings/<area>`) are `SETTINGS_SECTIONS` in `src/lib/router.ts`. A new card goes into the area it belongs to; a link to a setting names its area (`navigate({ page: 'settings', section })`) |
 | Shell commands and events | `src-tauri/src/{commands,state}.rs` |
 | Backend facade (Tauri vs mock) | `src/lib/backend/` |
 | Mesh parsers (STL, OBJ, 3MF) and workers | `src/lib/mesh/`, `src/workers/{mesh,thumb}-worker.ts` |

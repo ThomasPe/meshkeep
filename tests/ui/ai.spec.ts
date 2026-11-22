@@ -8,7 +8,7 @@ test.beforeEach(async ({ page }) => {
 });
 
 async function storeKey(page: import('@playwright/test').Page) {
-  await page.goto('/#/settings');
+  await page.goto('/#/settings/ai');
   await expect(page.getByTestId('ai-key-status')).toHaveAttribute('data-state', 'missing');
   await page.getByTestId('ai-key').fill('sk-ant-mock-key');
   await page.getByTestId('ai-key-save').click();
@@ -17,7 +17,7 @@ async function storeKey(page: import('@playwright/test').Page) {
 }
 
 test('settings: the AI card stores endpoint and model, the key only as a flag, and tests the connection', async ({ page }) => {
-  await page.goto('/#/settings');
+  await page.goto('/#/settings/ai');
   const card = page.getByTestId('ai-key-status');
   await expect(card).toHaveAttribute('data-state', 'missing');
   await expect(page.getByTestId('ai-sent')).toContainText('Model files never do');
@@ -48,7 +48,7 @@ test('settings: the AI card stores endpoint and model, the key only as a flag, a
 });
 
 test('settings: a rejected key shows up in the connection test', async ({ page }) => {
-  await page.goto('/?ai=unauthorized#/settings');
+  await page.goto('/?ai=unauthorized#/settings/ai');
   await page.getByTestId('ai-key').fill('bad-key');
   await page.getByTestId('ai-key-save').click();
   await page.getByTestId('ai-test').click();
@@ -63,7 +63,7 @@ test('inspector: without a key the suggestion dialog points to settings', async 
   await expect(page.getByTestId('suggest-setup')).toBeVisible();
   await expect(page.getByTestId('suggest-apply')).toBeDisabled();
   await page.getByTestId('suggest-open-settings').click();
-  await expect(page.getByTestId('settings')).toBeVisible();
+  await expect(page.getByTestId('settings')).toHaveAttribute('data-section', 'ai');
   await expect(page.getByTestId('ai-key')).toBeVisible();
 });
 
@@ -107,7 +107,7 @@ test('inspector: a suggestion shows per-field choices, new tags are marked, appl
 });
 
 test('inspector: provider errors are shown in the dialog with a retry', async ({ page }) => {
-  await page.goto('/?ai=unavailable#/settings');
+  await page.goto('/?ai=unavailable#/settings/ai');
   await page.getByTestId('ai-key').fill('sk-ant-mock-key');
   await page.getByTestId('ai-key-save').click();
   await page.goto('/?ai=unavailable#/library');

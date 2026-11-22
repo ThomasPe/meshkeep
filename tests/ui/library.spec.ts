@@ -93,6 +93,7 @@ test('two edits in a row save without a conflict; reload after a real conflict d
 
 test('feedback: the dialog opens a prefilled GitHub issue with version and system info', async ({ page }) => {
   await page.getByTestId('nav-settings').click();
+  await page.getByTestId('settings-nav-about').click();
   await page.getByTestId('send-feedback').click();
   const dialog = page.getByTestId('feedback-dialog');
   await expect(dialog).toBeVisible();
@@ -186,6 +187,7 @@ test('breadcrumbs: every step above the current place navigates there (#73)', as
 
 test('settings: the diagnostics package is written on request and its contents are listed', async ({ page }) => {
   await page.getByTestId('nav-settings').click();
+  await page.getByTestId('settings-nav-about').click();
   const status = page.getByTestId('diagnostics-status');
   await expect(status).toHaveAttribute('data-state', 'idle');
   await page.getByTestId('export-diagnostics').click();
@@ -198,6 +200,7 @@ test('settings: the diagnostics package is written on request and its contents a
 
 test('settings: the model-page switch is off by default and its state is explained', async ({ page }) => {
   await page.getByTestId('nav-settings').click();
+  await page.getByTestId('settings-nav-ai').click();
   const status = page.getByTestId('fetch-pages-status');
   await expect(status).toHaveAttribute('data-state', 'off');
   await expect(status).toContainText('never opens a model page');
@@ -207,6 +210,7 @@ test('settings: the model-page switch is off by default and its state is explain
   await expect(status).toContainText('sees your IP address');
   await page.getByTestId('nav-library').click();
   await page.getByTestId('nav-settings').click();
+  await page.getByTestId('settings-nav-ai').click();
   await expect(page.getByTestId('fetch-pages-status')).toHaveAttribute('data-state', 'on');
 });
 
@@ -218,6 +222,8 @@ test('model pages: off by default with a hint, on request the page feeds the dia
   await expect(dialog).toHaveAttribute('data-mode', 'page');
   await expect(dialog.getByTestId('suggest-setup')).toContainText('Loading model pages is off');
   await dialog.getByTestId('suggest-open-settings').click();
+  // the dialog leads to the area that holds the switch, not to the top of the settings
+  await expect(page.getByTestId('settings')).toHaveAttribute('data-section', 'ai');
   await page.getByTestId('fetch-pages-toggle').click();
   await expect(page.getByTestId('fetch-pages-status')).toHaveAttribute('data-state', 'on');
   await page.getByTestId('nav-library').click();
@@ -260,14 +266,46 @@ test('settings lists roots and switches language', async ({ page }) => {
   await page.getByTestId('nav-settings').click();
   await expect(page.getByTestId('root-row')).toHaveCount(2);
   // updates card (mock is an updater build): manual check, nothing installs on its own
+  await page.getByTestId('settings-nav-about').click();
   await page.getByTestId('check-update').click();
   await expect(page.getByTestId('update-status')).toContainText('Version 0.2.0 is available');
   await expect(page.getByTestId('install-update')).toBeVisible();
+  await page.getByTestId('settings-nav-general').click();
   await page.getByTestId('language').click();
   await page.getByRole('option', { name: 'Deutsch' }).click();
   await expect(page.getByRole('heading', { name: 'Einstellungen' })).toBeVisible();
   await page.getByTestId('nav-library').click();
   await expect(page.getByTestId('filter-all')).toContainText('Alle Projekte');
+});
+
+test('settings: each area has its own address, the navigation marks it and Back returns (APP-4)', async ({ page }) => {
+  await page.getByTestId('nav-settings').click();
+  const settings = page.getByTestId('settings');
+  const nav = (area: string) => page.getByTestId(`settings-nav-${area}`);
+  await expect(settings).toHaveAttribute('data-section', 'library');
+  await expect(page.getByTestId('settings-nav').getByRole('link')).toHaveText(['Library', 'General', 'AI & network', 'Agents (MCP)', 'About & support']);
+  await expect(nav('library')).toHaveAttribute('aria-current', 'page');
+  // only the cards of the current area are on the page
+  await expect(page.getByTestId('root-row')).toHaveCount(2);
+  await expect(page.getByTestId('mcp-toggle')).toHaveCount(0);
+  await nav('mcp').click();
+  await expect(page).toHaveURL(/#\/settings\/mcp$/);
+  await expect(nav('mcp')).toHaveAttribute('aria-current', 'page');
+  await expect(nav('library')).not.toHaveAttribute('aria-current', 'page');
+  await expect(page.getByTestId('mcp-toggle')).toBeVisible();
+  await expect(page.getByTestId('root-row')).toHaveCount(0);
+  await expect(page.getByTestId('nav-settings')).toHaveClass(/bg-accent/);
+  // the agents' area points to the conventions, which belong to the library
+  await page.getByTestId('mcp-conventions-link').click();
+  await expect(settings).toHaveAttribute('data-section', 'library');
+  await expect(page.getByTestId('conventions-root').first()).toBeVisible();
+  await page.goBack();
+  await expect(settings).toHaveAttribute('data-section', 'mcp');
+  // an address opens its area directly; one that does not exist opens the first
+  await page.goto('/#/settings/about');
+  await expect(page.getByTestId('data-dir')).toBeVisible();
+  await page.goto('/#/settings/nonsense');
+  await expect(settings).toHaveAttribute('data-section', 'library');
 });
 
 test('no console errors on the main screens', async ({ page }) => {
@@ -278,6 +316,10 @@ test('no console errors on the main screens', async ({ page }) => {
   await expect(page.getByTestId('project-page')).toBeVisible();
   await page.getByTestId('nav-settings').click();
   await expect(page.getByTestId('settings')).toBeVisible();
+  for (const section of ['general', 'ai', 'mcp', 'about', 'library']) {
+    await page.getByTestId(`settings-nav-${section}`).click();
+    await expect(page.getByTestId('settings')).toHaveAttribute('data-section', section);
+  }
   expect(errors.filter((e) => !/no file contents in browser mode|WebGL|GPU stall|GL_INVALID/.test(e))).toEqual([]);
 });
 
@@ -419,6 +461,7 @@ test('import: picker opens the staging dialog, proposals are editable, confirm c
 
 test('import: with model pages on, the page fills the new project', async ({ page }) => {
   await page.getByTestId('nav-settings').click();
+  await page.getByTestId('settings-nav-ai').click();
   await page.getByTestId('fetch-pages-toggle').click();
   await expect(page.getByTestId('fetch-pages-status')).toHaveAttribute('data-state', 'on');
   await page.getByTestId('nav-library').click();
@@ -681,6 +724,7 @@ test('preview: a project image or the current view becomes the thumbnail, automa
 
 test('MCP server: off by default, enabling mints a token, snippets and import folders follow the settings', async ({ page }) => {
   await page.getByTestId('nav-settings').click();
+  await page.getByTestId('settings-nav-mcp').click();
   const state = page.getByTestId('mcp-state');
   await expect(state).toHaveAttribute('data-state', 'off');
   await expect(page.getByTestId('mcp-token')).toHaveValue('');
@@ -727,8 +771,14 @@ test('MCP server: off by default, enabling mints a token, snippets and import fo
   await expect(page.getByText('Agents may now ask for AI suggestions')).toBeVisible();
   await expect(page.getByTestId('mcp-ai-hint')).toContainText('no API key is stored');
   expect(await page.evaluate(() => (window as unknown as { __mockMcp?: Array<{ allow_ai: boolean }> }).__mockMcp!.at(-1))).toMatchObject({ allow_ai: true });
+  // the key is stored in another area; the hint leads there
+  await page.getByTestId('mcp-ai-open-key').click();
+  await expect(page.getByTestId('settings')).toHaveAttribute('data-section', 'ai');
   await page.getByTestId('ai-key').fill('sk-ant-mock-key');
   await page.getByTestId('ai-key-save').click();
+  await expect(page.getByTestId('ai-key-status')).toHaveAttribute('data-state', 'stored');
+  await page.goBack();
+  await expect(page.getByTestId('mcp-ai-open-key')).toHaveCount(0);
   await expect(page.getByTestId('mcp-ai-hint')).toContainText('with your key');
   await expect(page.getByTestId('mcp-sent')).toContainText('every suggestion an agent asks for goes to your AI provider');
   // a port below 1024 is refused, a taken port shows up in the status line
@@ -746,6 +796,7 @@ test('MCP server: off by default, enabling mints a token, snippets and import fo
 
 test('MCP audit: what agents changed is listed newest first, leads to the project and can be cleared (#103)', async ({ page }) => {
   await page.getByTestId('nav-settings').click();
+  await page.getByTestId('settings-nav-mcp').click();
   const entries = page.getByTestId('mcp-audit-entry');
   await expect(entries).toHaveCount(3);
   await expect(page.getByTestId('mcp-audit-count')).toHaveText('3 changes');
@@ -1029,6 +1080,7 @@ test('settings: preview location and notification toggle; import notifies when u
   await page.getByTestId('thumb-location-project').click();
   await expect(page.getByText('Preview location saved')).toBeVisible();
   await expect(page.getByTestId('thumb-location-project')).toHaveAttribute('data-state', 'on');
+  await page.getByTestId('settings-nav-general').click();
   await expect(page.getByTestId('notifications-toggle')).toHaveAttribute('data-state', 'checked');
   await page.getByTestId('nav-library').click();
   // pretend the window is in the background: the import then ends in an OS notification
@@ -1810,6 +1862,7 @@ test('hotkeys: the folder tree keeps its own keys, settings list the shortcuts',
   await page.keyboard.press('Escape');
   await expect(main).toHaveAttribute('data-selected-count', '1');
   await page.getByTestId('nav-settings').click();
+  await page.getByTestId('settings-nav-general').click();
   await expect(page.getByTestId('shortcut')).toHaveCount(6);
   await expect(page.locator('[data-testid="shortcut"][data-action="selectAll"]')).toContainText('Select all projects in view');
   await expect(page.locator('[data-testid="shortcut"][data-action="selectAll"] kbd')).toHaveText(['Ctrl', 'A']);

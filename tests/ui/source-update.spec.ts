@@ -28,6 +28,7 @@ test('batch update from source pages: one choice up front, progress, and a summa
   await expect(dialog.getByTestId('source-update-setup')).toContainText('Loading model pages is off');
   await expect(dialog.getByTestId('source-update-start')).toBeDisabled();
   await dialog.getByTestId('source-update-open-settings').click();
+  await expect(page.getByTestId('settings')).toHaveAttribute('data-section', 'ai');
   await page.getByTestId('fetch-pages-toggle').click();
   await expect(page.getByTestId('fetch-pages-status')).toHaveAttribute('data-state', 'on');
   await page.getByTestId('nav-library').click();
@@ -76,6 +77,7 @@ test('batch update from source pages: one choice up front, progress, and a summa
 test('batch update from source pages: overwrite replaces values, a changed project.yaml is left alone, cancel stops the rest', async ({ page }) => {
   const dialog = page.getByTestId('source-update-dialog');
   await page.getByTestId('nav-settings').click();
+  await page.getByTestId('settings-nav-ai').click();
   await page.getByTestId('fetch-pages-toggle').click();
   await expect(page.getByTestId('fetch-pages-status')).toHaveAttribute('data-state', 'on');
   await page.getByTestId('nav-library').click();

@@ -151,6 +151,10 @@ submission is outside the code: Partner Center identity values, screenshots
 - [x] **Settings module** (APP-4): roots, sync mode with poll interval, ignore patterns,
       bundle folders, preview cache and location, OS notifications for background
       scans/imports, updates, theme, language. Engine settings persist in `settings.json`.
+- [x] **Settings in areas** (APP-4): the sixteen cards are grouped into five areas (Library,
+      General, AI & network, Agents (MCP), About & support) behind a navigation on the left,
+      each with its own address (`#/settings/<area>`). Dialogs that need a setting (AI key,
+      model pages) open its area. Tests: router unit test, UI tests in browser mode.
 
 ## Phase 2: Quality of life
 

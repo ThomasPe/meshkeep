@@ -104,7 +104,7 @@ export function SuggestDialog({ project: p, open, onOpenChange, mode = 'ai' }: {
         {setup && (
           <div className="grid gap-3 rounded-[10px] bg-accent p-3 text-sm text-accent-foreground" data-testid="suggest-setup">
             {k('suggestSetup')}
-            <div><Button size="sm" variant="outline" onClick={() => { onOpenChange(false); navigate({ page: 'settings' }); }} data-testid="suggest-open-settings"><SettingsIcon />{t('inspector.suggestOpenSettings')}</Button></div>
+            <div><Button size="sm" variant="outline" onClick={() => { onOpenChange(false); navigate({ page: 'settings', section: 'ai' }); }} data-testid="suggest-open-settings"><SettingsIcon />{t('inspector.suggestOpenSettings')}</Button></div>
           </div>
         )}
         {suggest.isError && !setup && (

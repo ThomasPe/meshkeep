@@ -95,7 +95,7 @@ export function SourceUpdateDialog() {
             {net.data && !allowed && (
               <div className="grid gap-3 rounded-[10px] bg-accent p-3 text-accent-foreground" data-testid="source-update-setup">
                 {t('inspector.page.suggestSetup')}
-                <div><Button size="sm" variant="outline" onClick={() => { close(); navigate({ page: 'settings' }); }} data-testid="source-update-open-settings"><SettingsIcon />{t('inspector.suggestOpenSettings')}</Button></div>
+                <div><Button size="sm" variant="outline" onClick={() => { close(); navigate({ page: 'settings', section: 'ai' }); }} data-testid="source-update-open-settings"><SettingsIcon />{t('inspector.suggestOpenSettings')}</Button></div>
               </div>
             )}
             <fieldset className="grid gap-2">

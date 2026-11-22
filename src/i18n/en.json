@@ -244,6 +244,14 @@
   },
   "settings": {
     "title": "Settings",
+    "sectionsNav": "Settings areas",
+    "sections": {
+      "library": "Library",
+      "general": "General",
+      "ai": "AI & network",
+      "mcp": "Agents (MCP)",
+      "about": "About & support"
+    },
     "roots": "Library roots",
     "rootsHint": "Folders the app indexes and may write metadata into.",
     "addFolder": "Add folder…",
@@ -411,6 +419,8 @@
     "mcpCopied": "Copied",
     "mcpCopyFailed": "Could not copy; select the text instead",
     "mcpSent": "What an agent sees: whatever the tools return, which is your project metadata, file names, readme text, the preview pictures, the folders you listed above and, with “Load model pages” on, what those pages say. Where the agent sends it depends on the client you connect and its own privacy policy. Meshkeep itself sends nothing anywhere, with one exception: while “Allow AI suggestions” is on, every suggestion an agent asks for goes to your AI provider.",
+    "mcpConventions": "Agents receive the conventions of each library when they connect. They are set per library folder.",
+    "mcpConventionsLink": "Open library conventions",
     "mcpDeletes": "Allow deleting (to the trash)",
     "mcpDeletesNeedsWrites": "Needs “Allow writes” first.",
     "mcpDeletesHintOn": "On: agents can move files and whole projects to the recycle bin, including duplicates they resolve. Nothing is deleted permanently; the recycle bin keeps it.",
@@ -423,6 +433,7 @@
     "mcpAiHintOn": "On: an agent can ask Meshkeep’s AI assistant what a project is. Each request goes to the AI provider set up above, with your key, and sends what a suggestion in the window sends: the preview picture, file names and sizes, readme and license text and the current metadata, never the models. The answer is a proposal; writing it needs “Allow writes”.",
     "mcpAiHintOff": "Off: agents work with what they can read themselves and cannot use your AI key.",
     "mcpAiHintNoKey": "On, but no API key is stored under “AI assistance”: no request is made until there is one.",
+    "mcpAiOpenKey": "Store a key",
     "mcpAudit": "What agents changed",
     "mcpAuditHint": "Every change an agent made through the MCP server: which tool, which projects, when. Kept on this computer, in the app’s data folder.",
     "mcpAuditEmpty": "Nothing yet. A change an agent makes with the writing or deleting tools shows up here.",

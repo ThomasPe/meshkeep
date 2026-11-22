@@ -19,7 +19,7 @@ describe('Meshkeep AI assistance (mock provider)', () => {
 
   it('refuses to call the provider without a key and keeps the key out of settings.json', async () => {
     await $('[data-testid="app"]').waitForDisplayed({ timeout: 30000 });
-    await browser.url(await browser.getUrl().then((u) => u.split('#')[0] + '#/settings'));
+    await browser.url(await browser.getUrl().then((u) => u.split('#')[0] + '#/settings/ai'));
     await $('[data-testid="settings"]').waitForDisplayed({ timeout: 20000 });
     await expect($('[data-testid="ai-key-status"]')).toHaveAttribute('data-state', 'missing');
     // the engine gate: a suggestion without a key fails before any provider is touched
