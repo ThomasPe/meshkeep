@@ -5,7 +5,8 @@
 //! spec wants heavy work off the UI path, and this is how a regression shows up in a log a
 //! user sends in.
 
-use crate::Engine;
+use crate::model::ScanReport;
+use crate::{Engine, Result, ScanProgress};
 use std::ops::{Deref, DerefMut};
 use std::panic::Location;
 use std::sync::{LockResult, Mutex, MutexGuard, PoisonError};
@@ -49,6 +50,16 @@ impl SharedEngine {
             Ok(guard) => Ok(wrap(guard)),
             Err(poisoned) => Err(PoisonError::new(wrap(poisoned.into_inner()))),
         }
+    }
+
+    /// Scans a root while holding the lock only to start and to finish: the walk over the
+    /// disk runs without it, so commands of the window are answered meanwhile (a locked
+    /// scan of a large or slow root kept the first screen waiting). `Engine::scan_root_as`
+    /// is the same scan in one piece.
+    pub fn scan_root(&self, id: &str, trigger: &str, progress: impl FnMut(ScanProgress)) -> Result<ScanReport> {
+        let job = self.lock().unwrap().scan_job(id, trigger)?;
+        let walk = job.walk(progress);
+        self.lock().unwrap().finish_scan(job, walk)
     }
 
     /// Like `Mutex::try_lock`: `None` while someone else holds the engine.

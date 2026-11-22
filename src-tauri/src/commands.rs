@@ -365,9 +365,19 @@ pub fn list_projects(state: State<AppState>, query: ListQuery) -> CmdResult<Vec<
     Ok(state.engine.lock().unwrap().list_projects(&query)?)
 }
 
+/// The project as the index has it. If its folder is gone from an online root, the library
+/// was changed outside the app: the root is read again in the background and the window
+/// refreshes when that is done (`state::repair_root`).
 #[tauri::command(async)]
-pub fn get_project(state: State<AppState>, id: String) -> CmdResult<Project> {
-    Ok(state.engine.lock().unwrap().get_project(&id)?)
+pub fn get_project(app: AppHandle, state: State<AppState>, id: String) -> CmdResult<Project> {
+    let (project, stale) = {
+        let engine = state.engine.lock().unwrap();
+        (engine.get_project(&id)?, engine.stale_root(&id, None))
+    };
+    if let Some(root_id) = stale {
+        state::repair_root(&app, &root_id);
+    }
+    Ok(project)
 }
 
 #[tauri::command(async)]
@@ -409,7 +419,22 @@ pub fn library_stats(state: State<AppState>, root_id: Option<String>) -> CmdResu
 #[tauri::command]
 pub async fn read_project_file(app: AppHandle, project_id: String, rel_path: String) -> CmdResult<Response> {
     // on disk or inside the project's packed archive (LIB-9); read outside the engine lock
-    let located = { app.state::<AppState>().engine.lock().unwrap().locate(&project_id, &rel_path)? };
+    let located = {
+        let state = app.state::<AppState>();
+        let engine = state.engine.lock().unwrap();
+        let located = engine.locate(&project_id, &rel_path);
+        located.map_err(|e| (e, engine.stale_root(&project_id, Some(&rel_path))))
+    };
+    let located = match located {
+        Ok(l) => l,
+        Err((e, stale)) => {
+            // an indexed file that is gone: the library changed outside the app
+            if let Some(root_id) = stale {
+                state::repair_root(&app, &root_id);
+            }
+            return Err(e.into());
+        }
+    };
     let bytes = tauri::async_runtime::spawn_blocking(move || located.read())
         .await
         .map_err(|e| AppError {

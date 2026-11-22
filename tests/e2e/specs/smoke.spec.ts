@@ -307,3 +307,36 @@ describe('Meshkeep D5 (facets, batch edit, settings)', () => {
     await browser.waitUntil(() => !fs.existsSync(cache), { timeout: 10000 });
   });
 });
+
+// LIB-3: the fixture root is scanned on request only, so nothing tells the app about a folder
+// that is renamed behind its back. Reading the project finds the folder gone; the app reads
+// the root again by itself and says why the library just changed.
+describe('Meshkeep (library changed outside the app)', () => {
+  const fixture = () => process.env.MESHKEEP_E2E_FIXTURE!;
+  type Row = { id: string; root_id: string; rel_path: string };
+  const list = async () => await browser.tauri.execute(({ core }) => core.invoke('list_projects', { query: {} })) as Row[];
+
+  it('reads the root again when a project folder is gone and tells the user', async () => {
+    const from = path.join(fixture(), 'Gridfinity', 'Baseplates');
+    const to = path.join(fixture(), 'Gridfinity', 'Baseplates moved');
+    const old = (await list()).find((p) => p.rel_path === 'Gridfinity/Baseplates');
+    expect(old).toBeDefined();
+    fs.renameSync(from, to);
+    try {
+      // the index still answers for the old folder: that request is what starts the repair
+      await browser.tauri.execute(({ core }, id) => core.invoke('get_project', { id }), old!.id);
+      await browser.waitUntil(async () => {
+        const now = await list();
+        return now.some((p) => p.rel_path === 'Gridfinity/Baseplates moved') && !now.some((p) => p.id === old!.id);
+      }, { timeout: 20000, timeoutMsg: 'the root was not read again' });
+      await $('//*[contains(text(), "changed outside Meshkeep")]').waitForDisplayed({ timeout: 10000, timeoutMsg: 'no notice about the change' });
+      const roots = await browser.tauri.execute(({ core }) => core.invoke('get_roots')) as Array<{ id: string; last_scan: { trigger: string } | null }>;
+      expect(roots.find((r) => r.id === old!.root_id)?.last_scan?.trigger).toBe('resync');
+    } finally {
+      // leave the fixture and the index as they were
+      fs.renameSync(to, from);
+      await browser.tauri.execute(({ core }, id) => core.invoke('scan_root', { id }), old!.root_id);
+    }
+    expect((await list()).some((p) => p.id === old!.id)).toBe(true);
+  });
+});

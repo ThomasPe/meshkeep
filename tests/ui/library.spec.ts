@@ -1815,3 +1815,19 @@ test('hotkeys: the folder tree keeps its own keys, settings list the shortcuts',
   await expect(page.locator('[data-testid="shortcut"][data-action="selectAll"] kbd')).toHaveText(['Ctrl', 'A']);
   await expect(page.locator('[data-testid="shortcut"][data-action="focusSearch"] kbd')).toHaveText(['Ctrl', 'F', 'Ctrl', 'K']);
 });
+
+test('a project folder moved outside the app: the folder is read again and the app says why', async ({ page }) => {
+  await expect(page.getByTestId('project-card').first()).toBeVisible();
+  const before = Number(await page.getByTestId('result-count').textContent());
+  await page.evaluate(() => { (window as unknown as { __mockMoved?: Set<string> }).__mockMoved = new Set(['r1:Projects/Robotics/Arm v4']); });
+  await page.getByTestId('search').fill('robo');
+  await page.getByTestId('project-card').filter({ hasText: 'Robotic Arm v4' }).dblclick();
+  // the index still knew the project; opening it found the folder gone
+  await expect(page.getByText('This folder was changed outside Meshkeep')).toBeVisible();
+  await expect(page.getByTestId('project-gone')).toContainText('not here any more');
+  await expect(page.getByTestId('statusbar')).not.toContainText('Scanning');
+  await page.getByTestId('project-gone').getByRole('link', { name: 'Library' }).click();
+  await expect(page.getByTestId('result-count')).toHaveText('0');
+  await page.getByRole('button', { name: 'clear search' }).click();
+  await expect(page.getByTestId('result-count')).toHaveText(String(before - 1));
+});

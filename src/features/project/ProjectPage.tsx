@@ -20,6 +20,7 @@ import { formatBytes, initials } from '@/lib/format';
 import { useEmbeddedPictures, useProject, useRoots } from '@/lib/queries';
 import { navigate, routeHref } from '@/lib/router';
 import { useFileThumbListing, useFileThumbScope } from '@/lib/thumbs/useFileThumb';
+import { isAppError } from '@/lib/types';
 import { cn } from '@/lib/utils';
 
 export function ProjectPage({ id }: { id: string }) {
@@ -37,7 +38,8 @@ export function ProjectPage({ id }: { id: string }) {
   const choose = useChooseThumbnail(project.data ?? null);
   const { actions, dialogs } = useProjectActions({ onRenamed: (_old, newId) => navigate({ page: 'project', id: newId }), onDeleted: () => navigate({ page: 'library' }) });
   if (project.isPending) return <div className="p-6 text-sm text-muted-foreground">{t('common.loading')}</div>;
-  if (project.isError || !project.data) return <div className="p-6"><p className="text-sm text-destructive">{t('errors.not_found')}</p><Button asChild variant="outline" className="mt-3"><a href={routeHref({ page: 'library' })}>{t('project.back')}</a></Button></div>;
+  // a project that is not in the index (any more): moved, renamed or deleted, here or outside the app
+  if (project.isError || !project.data) return <div className="p-6" data-testid="project-gone"><p className="text-sm text-destructive">{!project.error || (isAppError(project.error) && project.error.code === 'not_found') ? t('project.gone') : t('errors.generic', { message: isAppError(project.error) ? project.error.message : String(project.error) })}</p><Button asChild variant="outline" className="mt-3"><a href={routeHref({ page: 'library' })}>{t('project.back')}</a></Button></div>;
   const p = project.data;
   const root = roots.data?.find((r) => r.id === p.root_id);
   // without the root (still loading, or gone) the trail starts at the first folder

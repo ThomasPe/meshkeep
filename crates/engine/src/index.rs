@@ -20,6 +20,9 @@ use time::OffsetDateTime;
 
 pub struct Index {
     conn: Connection,
+    /// Counts the writes to project rows since the index was opened. A scan that read the
+    /// disk without the engine lock compares it to know whether its picture is still current.
+    revision: u64,
 }
 
 const SCHEMA_VERSION: i64 = 6;
@@ -188,11 +191,17 @@ impl Index {
             conn.execute_batch("DELETE FROM thumbs WHERE project_id IN (SELECT id FROM projects WHERE thumb_kind = 'embedded');")?;
         }
         conn.execute_batch(&format!("PRAGMA user_version = {SCHEMA_VERSION};"))?;
-        Ok(Index { conn })
+        Ok(Index { conn, revision: 0 })
+    }
+
+    /// See the `revision` field: changes whenever project rows are written.
+    pub fn revision(&self) -> u64 {
+        self.revision
     }
 
     /// Replaces all rows of a root with the given projects, in one transaction.
     pub fn rebuild_root(&mut self, root_id: &str, projects: &[Project]) -> Result<()> {
+        self.revision += 1;
         let tx = self.conn.transaction()?;
         tx.execute(
             "DELETE FROM projects_fts WHERE id IN (SELECT id FROM projects WHERE root_id = ?1)",
@@ -208,6 +217,7 @@ impl Index {
 
     /// Inserts or replaces a single project (after a watcher event or a metadata edit).
     pub fn upsert_project(&mut self, p: &Project) -> Result<()> {
+        self.revision += 1;
         let tx = self.conn.transaction()?;
         tx.execute("DELETE FROM projects_fts WHERE id = ?1", params![p.id])?;
         tx.execute("DELETE FROM projects WHERE id = ?1", params![p.id])?;
@@ -217,6 +227,7 @@ impl Index {
     }
 
     pub fn remove_project(&mut self, id: &str) -> Result<()> {
+        self.revision += 1;
         self.conn.execute("DELETE FROM projects_fts WHERE id = ?1", params![id])?;
         self.conn.execute("DELETE FROM projects WHERE id = ?1", params![id])?;
         self.conn.execute("DELETE FROM thumbs WHERE project_id = ?1", params![id])?;
@@ -305,6 +316,7 @@ impl Index {
     }
 
     pub fn remove_root(&mut self, root_id: &str) -> Result<()> {
+        self.revision += 1;
         self.conn.execute(
             "DELETE FROM projects_fts WHERE id IN (SELECT id FROM projects WHERE root_id = ?1)",
             params![root_id],

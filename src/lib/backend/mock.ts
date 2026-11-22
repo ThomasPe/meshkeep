@@ -237,7 +237,25 @@ export function createMockBackend(): Backend {
       }
       return applyQuery(list, q).map(summary);
     },
-    async getProject(id) { await delay(10); return { ...find(id) }; },
+    async getProject(id) {
+      await delay(10);
+      const p = { ...find(id) };
+      // tests move a project folder behind the app's back: window.__mockMoved = new Set([projectId]).
+      // Like the real app, the index still answers, and the root is then read again.
+      const moved = (window as unknown as { __mockMoved?: Set<string> }).__mockMoved;
+      if (moved?.delete(id)) {
+        void (async () => {
+          await delay(80);
+          const left = projects.filter((x) => x.root_id === p.root_id && x.id !== id);
+          listeners.scan.forEach((cb) => cb({ root_id: p.root_id, projects_found: left.length }));
+          await delay(120);
+          projects.splice(projects.findIndex((x) => x.id === id), 1);
+          const report = { root_id: p.root_id, projects: left.length, files: left.reduce((a, x) => a + x.files.length, 0), ignored: 12, warnings: [], millis: 200 };
+          listeners.lib.forEach((cb) => cb({ rootId: p.root_id, report, reason: 'resync' }));
+        })();
+      }
+      return p;
+    },
     async tagCounts(rootId) {
       const m = new Map<string, number>();
       for (const p of projects) if (!rootId || p.root_id === rootId) for (const t of p.tags) m.set(t, (m.get(t) ?? 0) + 1);

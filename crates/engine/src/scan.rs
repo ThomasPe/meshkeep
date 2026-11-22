@@ -48,7 +48,7 @@ pub const DEFAULT_CONTAINER_DIRS: &[&str] = &[
     "printfiles",
 ];
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ScanOptions {
     pub ignore: Vec<String>,
     pub container_dirs: Vec<String>,

@@ -1,9 +1,10 @@
 use meshkeep_engine::model::SyncMode;
 use meshkeep_engine::watch::{RootWatcher, WatchEvent};
 use meshkeep_engine::SharedEngine;
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::path::PathBuf;
 use std::sync::{mpsc, Arc, Mutex};
+use std::time::{Duration, Instant};
 use tauri::{AppHandle, Emitter, Manager};
 
 /// Startup configuration. Test mode isolates all app data and can seed a fixture root so
@@ -53,12 +54,26 @@ pub struct AppState {
     pub engine: Arc<SharedEngine>,
     pub watchers: Mutex<HashMap<String, RootWatcher>>,
     pub watch_tx: mpsc::Sender<WatchEvent>,
+    /// Scans the shell started on its own (catch-up at start, repair after a missing folder).
+    pub sync: Mutex<BackgroundSync>,
     pub ai_keys: crate::keys::AiKeyStore,
     pub config: RuntimeConfig,
     pub data_dir: PathBuf,
     /// The local MCP endpoint (ADR-0004); runs only while the setting is on.
     pub mcp: crate::mcp_host::Host,
 }
+
+/// Which roots a background scan is reading right now, and when each was last repaired.
+#[derive(Default)]
+pub struct BackgroundSync {
+    running: HashSet<String>,
+    repaired: HashMap<String, Instant>,
+}
+
+/// A root is repaired at most this often. After a scan the index matches the disk, so a
+/// second missing file within the interval is something a scan does not fix (a file that
+/// vanishes again and again, a volume that drops out); it must not scan in a loop.
+const REPAIR_INTERVAL: Duration = Duration::from_secs(30);
 
 /// Starts or stops the MCP server to match the stored settings, and wires its changes to
 /// the same events the commands emit, so the window follows what an agent does.
@@ -185,6 +200,75 @@ pub fn spawn_watch_loop(app: AppHandle, rx: mpsc::Receiver<WatchEvent>) {
             }
         })
         .expect("spawn watch thread");
+}
+
+/// Reads roots again on a thread of their own, one after the other, and tells the window:
+/// `scan://progress` while a root is read, `library://changed` with `reason` when it is done
+/// (with `error` when it could not be read, e.g. an offline drive). The disk is read without
+/// the engine lock (`SharedEngine::scan_root`), so the window is not kept waiting. A root
+/// that such a scan is already reading is skipped.
+pub fn sync_in_background(app: &AppHandle, root_ids: Vec<String>, reason: &'static str) {
+    if root_ids.is_empty() {
+        return;
+    }
+    let app = app.clone();
+    let spawned = std::thread::Builder::new().name("meshkeep-sync".into()).spawn(move || {
+        let state = app.state::<AppState>();
+        for root_id in root_ids {
+            if !state.sync.lock().unwrap().running.insert(root_id.clone()) {
+                continue;
+            }
+            let mut last = Instant::now() - Duration::from_secs(1);
+            let result = state.engine.scan_root(&root_id, reason, |p| {
+                if last.elapsed() >= Duration::from_millis(100) {
+                    last = Instant::now();
+                    let _ = app.emit("scan://progress", &p);
+                }
+            });
+            state.sync.lock().unwrap().running.remove(&root_id);
+            match result {
+                Ok(report) => {
+                    log::info!("{reason} scan of {root_id}: {} projects in {} ms", report.projects, report.millis);
+                    let _ = app.emit("library://changed", serde_json::json!({ "rootId": root_id, "report": report, "reason": reason }));
+                }
+                Err(e) => {
+                    log::warn!("{reason} scan of {root_id} failed: {e}");
+                    let _ = app.emit(
+                        "library://changed",
+                        serde_json::json!({ "rootId": root_id, "report": serde_json::Value::Null, "reason": reason, "error": e.to_string() }),
+                    );
+                }
+            }
+        }
+    });
+    if let Err(e) = spawned {
+        log::error!("cannot start the sync thread: {e}");
+    }
+}
+
+/// LIB-3: a watcher only sees what happens while the app runs. What was moved, renamed or
+/// deleted while it was closed is caught up here, once, for every watched root.
+pub fn spawn_startup_sync(app: &AppHandle) {
+    let state = app.state::<AppState>();
+    let roots = { state.engine.lock().unwrap().roots_to_catch_up() };
+    sync_in_background(app, roots, "startup");
+}
+
+/// The index named a folder or file that is gone from an online root (`Engine::stale_root`):
+/// the library was changed outside the app and nothing has reported it yet (a manual root, a
+/// polled one between two polls, an event the watcher missed). Reads that root again; the
+/// window then shows what is there and says why (`reason: "resync"`).
+pub fn repair_root(app: &AppHandle, root_id: &str) {
+    let state = app.state::<AppState>();
+    {
+        let mut sync = state.sync.lock().unwrap();
+        if sync.running.contains(root_id) || sync.repaired.get(root_id).is_some_and(|t| t.elapsed() < REPAIR_INTERVAL) {
+            return;
+        }
+        sync.repaired.insert(root_id.to_string(), Instant::now());
+    }
+    log::info!("root {root_id}: the index names something that is gone from disk, reading it again");
+    sync_in_background(app, vec![root_id.to_string()], "resync");
 }
 
 /// Polled roots (LIB-4): every 30 s, rescan the roots whose interval has elapsed. Network

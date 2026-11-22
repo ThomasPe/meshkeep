@@ -10,7 +10,7 @@
 |---|---|---|
 | LIB-1 | Add and remove library roots via the native folder picker (typed paths as a secondary option). Invalid or unreadable paths are reported, not silently ignored. | MVP |
 | LIB-2 | Recursive scan of each root finds model, image, document and attachment files, honoring the global ignore list. Scanning never writes to the library. | MVP |
-| LIB-3 | Real-time file watching keeps the index in sync with external changes (files added, removed, renamed, sidecar edited). The UI reflects changes without a manual refresh. | MVP |
+| LIB-3 | Real-time file watching keeps the index in sync with external changes (files added, removed, renamed, sidecar edited). The UI reflects changes without a manual refresh. A watcher sees nothing while the app is closed, so every watched root is read again once at start, in the background; the index answers meanwhile. In any sync mode, opening a project whose folder is gone from an online root, or reading one of its files that is gone, reads that root again and tells the user that the folder was changed outside the app (at most once per 30 s and root). | MVP |
 | LIB-4 | Fallback sync modes for volumes that cannot be watched (network shares): polled refresh with a configurable interval, and manual rescan. | MVP |
 | LIB-5 | Offline protection: a missing root marks its content as offline; nothing is deleted from the index. A later rescan clears the offline state. | MVP |
 | LIB-6 | Sync status per root: last sync time, syncing-in-progress indicator, and a detailed status log. | MVP |
