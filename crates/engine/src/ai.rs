@@ -20,6 +20,8 @@ use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::Arc;
 use std::time::Duration;
 
+/// The first provider's endpoint and model; every provider has its own pair, see
+/// `AiProviderKind::default_base_url` and `default_model`.
 pub const DEFAULT_BASE_URL: &str = "https://api.anthropic.com";
 /// Haiku-class: the schema is small and the inputs are a picture and a few names (ADR-0003
 /// "use the smallest model that fills the schema").
@@ -57,11 +59,46 @@ pub const KNOWN_LICENSES: &[&str] = &[
 
 // ---- settings ---------------------------------------------------------------------------
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
+/// The hosted services the app has a client for. Each one has its own endpoint, default model
+/// and API key: a key is only ever sent to the service it was stored for.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize, Default)]
 #[serde(rename_all = "snake_case")]
 pub enum AiProviderKind {
     #[default]
     Anthropic,
+    #[serde(rename = "openai")]
+    OpenAi,
+    Gemini,
+}
+
+impl AiProviderKind {
+    pub const ALL: [AiProviderKind; 3] = [AiProviderKind::Anthropic, AiProviderKind::OpenAi, AiProviderKind::Gemini];
+
+    /// The name in `settings.json` and on the wire.
+    pub fn id(self) -> &'static str {
+        match self {
+            AiProviderKind::Anthropic => "anthropic",
+            AiProviderKind::OpenAi => "openai",
+            AiProviderKind::Gemini => "gemini",
+        }
+    }
+
+    pub fn default_base_url(self) -> &'static str {
+        match self {
+            AiProviderKind::Anthropic => DEFAULT_BASE_URL,
+            AiProviderKind::OpenAi => "https://api.openai.com",
+            AiProviderKind::Gemini => "https://generativelanguage.googleapis.com",
+        }
+    }
+
+    /// The smallest current model of each service that reads a picture and fills a schema.
+    pub fn default_model(self) -> &'static str {
+        match self {
+            AiProviderKind::Anthropic => DEFAULT_MODEL,
+            AiProviderKind::OpenAi => "gpt-6-luna",
+            AiProviderKind::Gemini => "gemini-3.5-flash-lite",
+        }
+    }
 }
 
 /// The `ai` block of `settings.json`. Never holds the key (Q26: the base URL is here from
@@ -73,12 +110,9 @@ pub struct AiSettings {
     /// `None` means the provider's default endpoint.
     #[serde(default)]
     pub base_url: Option<String>,
-    #[serde(default = "default_model")]
+    /// Empty means the provider's default model (`effective_model`); `normalized` fills it in.
+    #[serde(default)]
     pub model: String,
-}
-
-fn default_model() -> String {
-    DEFAULT_MODEL.to_string()
 }
 
 impl Default for AiSettings {
@@ -86,13 +120,14 @@ impl Default for AiSettings {
         AiSettings {
             provider: AiProviderKind::Anthropic,
             base_url: None,
-            model: default_model(),
+            model: DEFAULT_MODEL.to_string(),
         }
     }
 }
 
 impl AiSettings {
-    /// Trims, drops empty values and refuses anything that is not an http(s) origin.
+    /// Trims, drops empty values and refuses anything that is not an http(s) origin. An empty
+    /// model becomes the provider's default, which is how the settings card switches provider.
     pub fn normalized(mut self) -> Result<AiSettings> {
         self.base_url = self
             .base_url
@@ -105,15 +140,20 @@ impl AiSettings {
                 )));
             }
         }
-        self.model = self.model.trim().to_string();
-        if self.model.is_empty() {
-            self.model = default_model();
-        }
+        self.model = self.effective_model().to_string();
         Ok(self)
     }
 
     pub fn effective_base_url(&self) -> &str {
-        self.base_url.as_deref().unwrap_or(DEFAULT_BASE_URL)
+        self.base_url.as_deref().unwrap_or(self.provider.default_base_url())
+    }
+
+    /// The model a call uses: a hand-edited `settings.json` may name a provider and no model.
+    pub fn effective_model(&self) -> &str {
+        match self.model.trim() {
+            "" => self.provider.default_model(),
+            m => m,
+        }
     }
 }
 
@@ -144,6 +184,110 @@ pub trait AiProvider: Send + Sync {
 /// Shared handle: the engine keeps one, a long call runs outside the engine lock.
 pub type SharedProvider = Arc<dyn AiProvider>;
 
+/// The client for the service the settings name. The key must be the one stored for
+/// `settings.provider`: the shell keeps one per provider and hands in the matching one.
+pub fn provider_for(settings: &AiSettings, api_key: &str) -> Result<SharedProvider> {
+    Ok(match settings.provider {
+        AiProviderKind::Anthropic => Arc::new(AnthropicProvider::new(settings, api_key)?),
+        AiProviderKind::OpenAi => Arc::new(OpenAiProvider::new(settings, api_key)?),
+        AiProviderKind::Gemini => Arc::new(GeminiProvider::new(settings, api_key)?),
+    })
+}
+
+fn http_client() -> Result<reqwest::blocking::Client> {
+    reqwest::blocking::Client::builder()
+        .timeout(Duration::from_secs(90))
+        .build()
+        .map_err(|e| EngineError::AiUnavailable(e.to_string()))
+}
+
+/// One POST with a JSON body: the HTTP status and the body text, whatever the status.
+fn post_json(
+    client: &reqwest::blocking::Client,
+    url: &str,
+    headers: &[(&str, &str)],
+    body: &serde_json::Value,
+    api_key: &str,
+) -> Result<(u16, String)> {
+    let mut call = client.post(url).header("content-type", "application/json");
+    for (name, value) in headers {
+        call = call.header(*name, *value);
+    }
+    let resp = call
+        .json(body)
+        .send()
+        .map_err(|e| EngineError::AiUnavailable(sanitize(&e.to_string(), api_key)))?;
+    let status = resp.status().as_u16();
+    let text = resp
+        .text()
+        .map_err(|e| EngineError::AiUnavailable(sanitize(&e.to_string(), api_key)))?;
+    Ok((status, text))
+}
+
+/// Like `post_json` for a request with a hint not every model or server knows (how much to
+/// think before answering): `body(true)` carries it; a 400 that names it (`marker`, lower
+/// case) is answered with one more request without it.
+fn post_with_hint(
+    client: &reqwest::blocking::Client,
+    url: &str,
+    headers: &[(&str, &str)],
+    api_key: &str,
+    marker: &str,
+    body: impl Fn(bool) -> serde_json::Value,
+) -> Result<(u16, String)> {
+    let (status, text) = post_json(client, url, headers, &body(true), api_key)?;
+    if status == 400 && text.to_ascii_lowercase().contains(marker) {
+        tracing::debug!("ai: the endpoint refused the {marker} hint, asking again without it");
+        return post_json(client, url, headers, &body(false), api_key);
+    }
+    Ok((status, text))
+}
+
+/// The typed error for a failed call; all three services use these status codes alike.
+fn status_error(status: u16, body: &str) -> EngineError {
+    let detail = error_detail(body);
+    match status {
+        401 | 403 => EngineError::AiUnauthorized(detail),
+        429 => EngineError::AiRateLimited(detail),
+        400 | 404 | 422 => EngineError::AiInvalidResponse(format!("HTTP {status}: {detail}")),
+        _ => EngineError::AiUnavailable(format!("HTTP {status}: {detail}")),
+    }
+}
+
+fn declined(why: &str) -> EngineError {
+    match why.trim() {
+        "" => EngineError::AiInvalidResponse("the model declined this request".into()),
+        why => EngineError::AiInvalidResponse(format!(
+            "the model declined this request: {}",
+            why.chars().take(200).collect::<String>()
+        )),
+    }
+}
+
+fn cut_off() -> EngineError {
+    EngineError::AiInvalidResponse("answer was cut off (max_tokens)".into())
+}
+
+/// The model's text as JSON. A server without real structured output (a local one behind the
+/// OpenAI client) may wrap the object in a Markdown code fence; that much is forgiven.
+fn answer_json(answer: &str) -> Result<serde_json::Value> {
+    let mut text = answer.trim();
+    if let Some(rest) = text.strip_prefix("```") {
+        text = rest.split_once('\n').map(|(_, body)| body).unwrap_or(rest);
+        text = text.trim_end().strip_suffix("```").unwrap_or(text).trim();
+    }
+    serde_json::from_str(text).map_err(|e| EngineError::AiInvalidResponse(format!("answer is not JSON: {e}")))
+}
+
+fn response_json(body: &str) -> Result<serde_json::Value> {
+    serde_json::from_str(body).map_err(|e| EngineError::AiInvalidResponse(format!("response is not JSON: {e}")))
+}
+
+fn png_base64(png: &[u8]) -> String {
+    use base64::Engine as _;
+    base64::engine::general_purpose::STANDARD.encode(png)
+}
+
 /// The Anthropic Messages API over plain HTTPS (raw HTTP; there is no official Rust SDK).
 pub struct AnthropicProvider {
     base_url: String,
@@ -154,15 +298,11 @@ pub struct AnthropicProvider {
 
 impl AnthropicProvider {
     pub fn new(settings: &AiSettings, api_key: &str) -> Result<AnthropicProvider> {
-        let client = reqwest::blocking::Client::builder()
-            .timeout(Duration::from_secs(90))
-            .build()
-            .map_err(|e| EngineError::AiUnavailable(e.to_string()))?;
         Ok(AnthropicProvider {
             base_url: settings.effective_base_url().to_string(),
-            model: settings.model.clone(),
+            model: settings.effective_model().to_string(),
             api_key: api_key.to_string(),
-            client,
+            client: http_client()?,
         })
     }
 }
@@ -187,12 +327,11 @@ struct ContentBlock {
 
 impl AiProvider for AnthropicProvider {
     fn complete(&self, req: &AiRequest) -> Result<AiResponse> {
-        use base64::Engine as _;
         let mut content = Vec::new();
         if let Some(png) = &req.image_png {
             content.push(serde_json::json!({
                 "type": "image",
-                "source": { "type": "base64", "media_type": "image/png", "data": base64::engine::general_purpose::STANDARD.encode(png) }
+                "source": { "type": "base64", "media_type": "image/png", "data": png_base64(png) }
             }));
         }
         content.push(serde_json::json!({ "type": "text", "text": req.text }));
@@ -205,33 +344,16 @@ impl AiProvider for AnthropicProvider {
         });
         let url = format!("{}/v1/messages", self.base_url);
         tracing::debug!(subject = %req.subject, model = %self.model, "ai request");
-        let resp = self
-            .client
-            .post(&url)
-            .header("x-api-key", &self.api_key)
-            .header("anthropic-version", ANTHROPIC_VERSION)
-            .header("content-type", "application/json")
-            .json(&body)
-            .send()
-            .map_err(|e| EngineError::AiUnavailable(sanitize(&e.to_string(), &self.api_key)))?;
-        let status = resp.status();
-        let text = resp
-            .text()
-            .map_err(|e| EngineError::AiUnavailable(sanitize(&e.to_string(), &self.api_key)))?;
-        if !status.is_success() {
-            let detail = error_detail(&text);
-            return Err(match status.as_u16() {
-                401 | 403 => EngineError::AiUnauthorized(detail),
-                429 => EngineError::AiRateLimited(detail),
-                400 | 404 | 422 => EngineError::AiInvalidResponse(format!("HTTP {status}: {detail}")),
-                _ => EngineError::AiUnavailable(format!("HTTP {status}: {detail}")),
-            });
+        let headers = [("x-api-key", self.api_key.as_str()), ("anthropic-version", ANTHROPIC_VERSION)];
+        let (status, text) = post_json(&self.client, &url, &headers, &body, &self.api_key)?;
+        if !(200..300).contains(&status) {
+            return Err(status_error(status, &text));
         }
         let parsed: MessagesResponse =
             serde_json::from_str(&text).map_err(|e| EngineError::AiInvalidResponse(format!("response is not JSON: {e}")))?;
         match parsed.stop_reason.as_deref() {
-            Some("refusal") => return Err(EngineError::AiInvalidResponse("the model declined this request".into())),
-            Some("max_tokens") => return Err(EngineError::AiInvalidResponse("answer was cut off (max_tokens)".into())),
+            Some("refusal") => return Err(declined("")),
+            Some("max_tokens") => return Err(cut_off()),
             _ => {}
         }
         let answer = parsed
@@ -249,7 +371,214 @@ impl AiProvider for AnthropicProvider {
     }
 }
 
-/// Error bodies look like `{"error":{"type":"...","message":"..."}}`; keep the message.
+/// OpenAI's Chat Completions API, the dialect most other services and local servers speak
+/// too (Q26), with the answer bound to the schema by strict structured output.
+pub struct OpenAiProvider {
+    url: String,
+    model: String,
+    api_key: String,
+    client: reqwest::blocking::Client,
+}
+
+impl OpenAiProvider {
+    pub fn new(settings: &AiSettings, api_key: &str) -> Result<OpenAiProvider> {
+        Ok(OpenAiProvider {
+            url: openai_url(settings.effective_base_url()),
+            model: settings.effective_model().to_string(),
+            api_key: api_key.to_string(),
+            client: http_client()?,
+        })
+    }
+}
+
+/// A bare origin gets the service's `/v1`; an endpoint with a path is the API root as the
+/// OpenAI SDKs take it (`http://localhost:11434/v1`, `https://openrouter.ai/api/v1`).
+fn openai_url(base: &str) -> String {
+    let base = base.trim_end_matches('/');
+    let after_scheme = base.split_once("://").map(|(_, rest)| rest).unwrap_or(base);
+    if after_scheme.contains('/') {
+        format!("{base}/chat/completions")
+    } else {
+        format!("{base}/v1/chat/completions")
+    }
+}
+
+fn openai_body(req: &AiRequest, model: &str, with_effort: bool) -> serde_json::Value {
+    let mut content = Vec::new();
+    if let Some(png) = &req.image_png {
+        content.push(serde_json::json!({
+            "type": "image_url",
+            "image_url": { "url": format!("data:image/png;base64,{}", png_base64(png)) }
+        }));
+    }
+    content.push(serde_json::json!({ "type": "text", "text": req.text }));
+    let mut body = serde_json::json!({
+        "model": model,
+        // the cap covers the model's reasoning and the answer; `max_tokens` is the deprecated name
+        "max_completion_tokens": req.max_tokens,
+        "messages": [
+            { "role": "system", "content": req.system },
+            { "role": "user", "content": content }
+        ],
+        "response_format": { "type": "json_schema", "json_schema": { "name": "answer", "strict": true, "schema": req.schema } }
+    });
+    if with_effort {
+        body["reasoning_effort"] = serde_json::json!("low");
+    }
+    body
+}
+
+fn openai_answer(body: &str, asked_model: &str) -> Result<AiResponse> {
+    let v = response_json(body)?;
+    let choice = v
+        .pointer("/choices/0")
+        .ok_or_else(|| EngineError::AiInvalidResponse("no choice in the answer".into()))?;
+    if let Some(refusal) = choice
+        .pointer("/message/refusal")
+        .and_then(|r| r.as_str())
+        .filter(|r| !r.trim().is_empty())
+    {
+        return Err(declined(refusal));
+    }
+    match choice.get("finish_reason").and_then(|r| r.as_str()) {
+        Some("length") => return Err(cut_off()),
+        Some("content_filter") => return Err(declined("")),
+        _ => {}
+    }
+    let answer = choice
+        .pointer("/message/content")
+        .and_then(|c| c.as_str())
+        .ok_or_else(|| EngineError::AiInvalidResponse("no text in the answer".into()))?;
+    Ok(AiResponse {
+        json: answer_json(answer)?,
+        model: v.get("model").and_then(|m| m.as_str()).unwrap_or(asked_model).to_string(),
+    })
+}
+
+impl AiProvider for OpenAiProvider {
+    fn complete(&self, req: &AiRequest) -> Result<AiResponse> {
+        tracing::debug!(subject = %req.subject, model = %self.model, "ai request");
+        let bearer = format!("Bearer {}", self.api_key);
+        let headers = [("authorization", bearer.as_str())];
+        // not every model takes `reasoning_effort`, and not every server knows the field
+        let (status, text) = post_with_hint(&self.client, &self.url, &headers, &self.api_key, "reasoning", |with_effort| {
+            openai_body(req, &self.model, with_effort)
+        })?;
+        if !(200..300).contains(&status) {
+            return Err(status_error(status, &text));
+        }
+        openai_answer(&text, &self.model)
+    }
+}
+
+/// Google's Gemini API (`generateContent`), with the answer bound to the schema by
+/// `responseJsonSchema`. The key travels in a header, never in the URL.
+pub struct GeminiProvider {
+    url: String,
+    model: String,
+    api_key: String,
+    client: reqwest::blocking::Client,
+}
+
+impl GeminiProvider {
+    pub fn new(settings: &AiSettings, api_key: &str) -> Result<GeminiProvider> {
+        // the model is part of the URL path; the API lists models as `models/<name>`
+        let model = settings.effective_model().trim_start_matches("models/").to_string();
+        if !model.chars().all(|c| c.is_ascii_alphanumeric() || matches!(c, '-' | '.' | '_')) {
+            return Err(EngineError::NotAllowed(format!("not a Gemini model name: {model}")));
+        }
+        Ok(GeminiProvider {
+            url: format!(
+                "{}/v1beta/models/{model}:generateContent",
+                settings.effective_base_url().trim_end_matches('/')
+            ),
+            model,
+            api_key: api_key.to_string(),
+            client: http_client()?,
+        })
+    }
+}
+
+fn gemini_body(req: &AiRequest, with_thinking_level: bool) -> serde_json::Value {
+    let mut parts = Vec::new();
+    if let Some(png) = &req.image_png {
+        parts.push(serde_json::json!({ "inlineData": { "mimeType": "image/png", "data": png_base64(png) } }));
+    }
+    parts.push(serde_json::json!({ "text": req.text }));
+    let mut body = serde_json::json!({
+        "systemInstruction": { "parts": [{ "text": req.system }] },
+        "contents": [{ "role": "user", "parts": parts }],
+        "generationConfig": {
+            "responseMimeType": "application/json",
+            "responseJsonSchema": req.schema,
+            // thinking counts against this cap, like the answer
+            "maxOutputTokens": req.max_tokens
+        }
+    });
+    if with_thinking_level {
+        body["generationConfig"]["thinkingConfig"] = serde_json::json!({ "thinkingLevel": "LOW" });
+    }
+    body
+}
+
+fn gemini_answer(body: &str, asked_model: &str) -> Result<AiResponse> {
+    let v = response_json(body)?;
+    if let Some(reason) = v.pointer("/promptFeedback/blockReason").and_then(|r| r.as_str()) {
+        return Err(declined(reason));
+    }
+    let candidate = v
+        .pointer("/candidates/0")
+        .ok_or_else(|| EngineError::AiInvalidResponse("no candidate in the answer".into()))?;
+    let finish = candidate.get("finishReason").and_then(|r| r.as_str());
+    if finish == Some("MAX_TOKENS") {
+        return Err(cut_off());
+    }
+    // parts marked `thought` are the model's reasoning summary, not the answer
+    let answer: String = candidate
+        .pointer("/content/parts")
+        .and_then(|p| p.as_array())
+        .map(|parts| {
+            parts
+                .iter()
+                .filter(|p| p.get("thought").and_then(|t| t.as_bool()) != Some(true))
+                .filter_map(|p| p.get("text").and_then(|t| t.as_str()))
+                .collect()
+        })
+        .unwrap_or_default();
+    if answer.trim().is_empty() {
+        return Err(match finish {
+            // SAFETY, RECITATION, PROHIBITED_CONTENT and the like end an answer before it starts
+            Some(reason) if reason != "STOP" => declined(reason),
+            _ => EngineError::AiInvalidResponse("no text in the answer".into()),
+        });
+    }
+    Ok(AiResponse {
+        json: answer_json(&answer)?,
+        model: v.get("modelVersion").and_then(|m| m.as_str()).unwrap_or(asked_model).to_string(),
+    })
+}
+
+impl AiProvider for GeminiProvider {
+    fn complete(&self, req: &AiRequest) -> Result<AiResponse> {
+        tracing::debug!(subject = %req.subject, model = %self.model, "ai request");
+        let headers = [("x-goog-api-key", self.api_key.as_str())];
+        // `thinkingLevel` is for Gemini 3 and later; older models refuse the field
+        let (status, text) = post_with_hint(&self.client, &self.url, &headers, &self.api_key, "thinking", |with_level| {
+            gemini_body(req, with_level)
+        })?;
+        if !(200..300).contains(&status) {
+            // Gemini answers a wrong key with 400 INVALID_ARGUMENT, not 401
+            if status == 400 && text.contains("API_KEY_INVALID") {
+                return Err(EngineError::AiUnauthorized(error_detail(&text)));
+            }
+            return Err(status_error(status, &text));
+        }
+        gemini_answer(&text, &self.model)
+    }
+}
+
+/// Error bodies look like `{"error":{"type":"...","message":"..."}}` with all three services;
+/// keep the message.
 fn error_detail(body: &str) -> String {
     serde_json::from_str::<serde_json::Value>(body)
         .ok()
@@ -784,6 +1113,378 @@ mod tests {
         }
         .normalized()
         .is_err());
+    }
+
+    /// Every provider has its own endpoint and default model; an empty model means that
+    /// default, and a `settings.json` from before there was a choice still reads as Anthropic.
+    #[test]
+    fn each_provider_has_its_own_endpoint_and_default_model() {
+        for kind in AiProviderKind::ALL {
+            let s = AiSettings {
+                provider: kind,
+                base_url: None,
+                model: String::new(),
+            };
+            assert_eq!(s.effective_base_url(), kind.default_base_url());
+            assert_eq!(
+                s.effective_model(),
+                kind.default_model(),
+                "unnormalized settings still name a model"
+            );
+            assert_eq!(s.normalized().unwrap().model, kind.default_model());
+            assert_eq!(serde_json::to_value(kind).unwrap(), kind.id());
+            assert!(kind.default_base_url().starts_with("https://"));
+        }
+        let ids: Vec<_> = AiProviderKind::ALL.iter().map(|k| k.id()).collect();
+        assert_eq!(ids, ["anthropic", "openai", "gemini"]);
+        let old: AiSettings = serde_json::from_str(r#"{ "base_url": null, "model": "claude-haiku-5-5" }"#).unwrap();
+        assert_eq!(old, AiSettings::default());
+        let edited: AiSettings = serde_json::from_str(r#"{ "provider": "gemini" }"#).unwrap();
+        assert_eq!(edited.effective_model(), "gemini-3.5-flash-lite");
+        // a chosen model survives, whatever the provider
+        let kept = AiSettings {
+            provider: AiProviderKind::OpenAi,
+            base_url: None,
+            model: " my-model ".into(),
+        };
+        assert_eq!(kept.normalized().unwrap().model, "my-model");
+    }
+
+    fn sample_request(image: bool) -> AiRequest {
+        AiRequest {
+            subject: "Cable Clips".into(),
+            system: "Answer with JSON only.".into(),
+            text: "Project folder: Cable Clips".into(),
+            image_png: image.then(|| b"\x89PNG-bytes".to_vec()),
+            schema: suggestion_schema(),
+            max_tokens: 4096,
+        }
+    }
+
+    #[test]
+    fn openai_requests_follow_chat_completions() {
+        let body = openai_body(&sample_request(true), "gpt-6-luna", true);
+        assert_eq!(body["model"], "gpt-6-luna");
+        assert_eq!(body["max_completion_tokens"], 4096);
+        assert!(
+            body.get("max_tokens").is_none(),
+            "the deprecated cap is refused by reasoning models"
+        );
+        assert_eq!(body["reasoning_effort"], "low");
+        assert_eq!(
+            body["messages"][0],
+            serde_json::json!({ "role": "system", "content": "Answer with JSON only." })
+        );
+        let content = &body["messages"][1]["content"];
+        assert_eq!(content[0]["type"], "image_url");
+        assert_eq!(
+            content[0]["image_url"]["url"],
+            format!("data:image/png;base64,{}", png_base64(b"\x89PNG-bytes"))
+        );
+        assert_eq!(
+            content[1],
+            serde_json::json!({ "type": "text", "text": "Project folder: Cable Clips" })
+        );
+        let format = &body["response_format"];
+        assert_eq!(format["type"], "json_schema");
+        assert_eq!(format["json_schema"]["strict"], true);
+        assert_eq!(format["json_schema"]["schema"], suggestion_schema());
+        // without a picture there is only the text; without the hint, no effort field
+        let plain = openai_body(&sample_request(false), "m", false);
+        assert_eq!(plain["messages"][1]["content"].as_array().unwrap().len(), 1);
+        assert!(plain.get("reasoning_effort").is_none());
+
+        // a bare origin gets /v1, an endpoint with a path is the API root
+        assert_eq!(openai_url("https://api.openai.com"), "https://api.openai.com/v1/chat/completions");
+        assert_eq!(
+            openai_url("http://localhost:11434/v1/"),
+            "http://localhost:11434/v1/chat/completions"
+        );
+        assert_eq!(
+            openai_url("https://openrouter.ai/api/v1"),
+            "https://openrouter.ai/api/v1/chat/completions"
+        );
+    }
+
+    /// Strict structured output takes a schema only when every object closes itself and
+    /// requires all of its properties (optional fields are nullable instead).
+    #[test]
+    fn schemas_are_strict_enough_for_openai() {
+        fn walk(v: &serde_json::Value, path: &str) {
+            if let Some(obj) = v.as_object() {
+                if obj.get("type").and_then(|t| t.as_str()) == Some("object") {
+                    assert_eq!(obj.get("additionalProperties"), Some(&serde_json::json!(false)), "{path}");
+                    let mut props: Vec<&str> = obj["properties"].as_object().unwrap().keys().map(|k| k.as_str()).collect();
+                    let mut required: Vec<&str> = obj["required"].as_array().unwrap().iter().map(|r| r.as_str().unwrap()).collect();
+                    props.sort();
+                    required.sort();
+                    assert_eq!(props, required, "{path}: every property must be required");
+                }
+                for (k, child) in obj {
+                    walk(child, &format!("{path}/{k}"));
+                }
+            } else if let Some(items) = v.as_array() {
+                for (i, child) in items.iter().enumerate() {
+                    walk(child, &format!("{path}/{i}"));
+                }
+            }
+        }
+        walk(&suggestion_schema(), "");
+        walk(&test_request().schema, "test");
+    }
+
+    #[test]
+    fn openai_answers_are_read_and_refusals_are_errors() {
+        let ok = openai_answer(
+            r#"{ "model": "gpt-6-luna-2026-09-01", "choices": [{ "finish_reason": "stop", "message": { "role": "assistant", "content": "{\"ok\": true}", "refusal": null } }] }"#,
+            "gpt-6-luna",
+        )
+        .unwrap();
+        assert_eq!(ok.json, serde_json::json!({ "ok": true }));
+        assert_eq!(ok.model, "gpt-6-luna-2026-09-01");
+        // a local server may fence the object and leave the model out
+        let fenced = openai_answer(
+            r#"{ "choices": [{ "finish_reason": "stop", "message": { "content": "```json\n{\"ok\": true}\n```" } }] }"#,
+            "llava",
+        )
+        .unwrap();
+        assert_eq!(fenced.json["ok"], true);
+        assert_eq!(fenced.model, "llava");
+        let message = |body: &str| match openai_answer(body, "m") {
+            Err(EngineError::AiInvalidResponse(m)) => m,
+            other => panic!("expected an invalid response, got {other:?}"),
+        };
+        assert!(message(
+            r#"{ "choices": [{ "finish_reason": "stop", "message": { "content": null, "refusal": "I cannot help with that." } }] }"#
+        )
+        .contains("declined this request: I cannot help"));
+        assert!(message(r#"{ "choices": [{ "finish_reason": "length", "message": { "content": "{\"ok\"" } }] }"#).contains("cut off"));
+        assert!(message(r#"{ "choices": [{ "finish_reason": "content_filter", "message": { "content": "" } }] }"#).contains("declined"));
+        assert!(message(r#"{ "choices": [] }"#).contains("no choice"));
+        assert!(
+            message(r#"{ "choices": [{ "finish_reason": "stop", "message": { "content": "sure, here it is" } }] }"#).contains("not JSON")
+        );
+        assert!(message("<html>").contains("response is not JSON"));
+    }
+
+    #[test]
+    fn gemini_requests_follow_generate_content() {
+        let body = gemini_body(&sample_request(true), true);
+        assert_eq!(body["systemInstruction"]["parts"][0]["text"], "Answer with JSON only.");
+        let parts = &body["contents"][0]["parts"];
+        assert_eq!(body["contents"][0]["role"], "user");
+        assert_eq!(
+            parts[0]["inlineData"],
+            serde_json::json!({ "mimeType": "image/png", "data": png_base64(b"\x89PNG-bytes") })
+        );
+        assert_eq!(parts[1]["text"], "Project folder: Cable Clips");
+        let config = &body["generationConfig"];
+        assert_eq!(config["responseMimeType"], "application/json");
+        assert_eq!(config["responseJsonSchema"], suggestion_schema());
+        assert_eq!(config["maxOutputTokens"], 4096);
+        assert_eq!(config["thinkingConfig"]["thinkingLevel"], "LOW");
+        let plain = gemini_body(&sample_request(false), false);
+        assert_eq!(plain["contents"][0]["parts"].as_array().unwrap().len(), 1);
+        assert!(plain["generationConfig"].get("thinkingConfig").is_none());
+
+        // the model is part of the path: `models/` is dropped, anything that is not a name refused
+        let settings = |model: &str| AiSettings {
+            provider: AiProviderKind::Gemini,
+            base_url: None,
+            model: model.into(),
+        };
+        let p = GeminiProvider::new(&settings("models/gemini-3.5-flash-lite"), "key").unwrap();
+        assert_eq!(
+            p.url,
+            "https://generativelanguage.googleapis.com/v1beta/models/gemini-3.5-flash-lite:generateContent"
+        );
+        assert!(!p.url.contains("key"), "the key is a header, never part of the URL");
+        assert!(matches!(
+            GeminiProvider::new(&settings("x/../y?key=1"), "key"),
+            Err(EngineError::NotAllowed(_))
+        ));
+    }
+
+    #[test]
+    fn gemini_answers_skip_thoughts_and_blocked_prompts_are_errors() {
+        let ok = gemini_answer(
+            r#"{ "candidates": [{ "content": { "role": "model", "parts": [{ "text": "the user wants ok", "thought": true }, { "text": "{\"ok\":" }, { "text": " true}" }] }, "finishReason": "STOP" }], "modelVersion": "gemini-3.5-flash-lite-001" }"#,
+            "gemini-3.5-flash-lite",
+        )
+        .unwrap();
+        assert_eq!(ok.json, serde_json::json!({ "ok": true }));
+        assert_eq!(ok.model, "gemini-3.5-flash-lite-001");
+        let message = |body: &str| match gemini_answer(body, "m") {
+            Err(EngineError::AiInvalidResponse(m)) => m,
+            other => panic!("expected an invalid response, got {other:?}"),
+        };
+        assert!(message(r#"{ "promptFeedback": { "blockReason": "SAFETY" } }"#).contains("declined this request: SAFETY"));
+        assert!(message(r#"{ "candidates": [{ "finishReason": "RECITATION" }] }"#).contains("declined this request: RECITATION"));
+        assert!(
+            message(r#"{ "candidates": [{ "content": { "parts": [{ "text": "{\"ok\"" }] }, "finishReason": "MAX_TOKENS" }] }"#)
+                .contains("cut off")
+        );
+        assert!(message(r#"{ "candidates": [{ "content": { "parts": [] }, "finishReason": "STOP" }] }"#).contains("no text"));
+        assert!(message(r#"{ "candidates": [] }"#).contains("no candidate"));
+    }
+
+    #[test]
+    fn failed_calls_map_to_typed_errors() {
+        let openai =
+            r#"{ "error": { "message": "Incorrect API key provided.", "type": "invalid_request_error", "code": "invalid_api_key" } }"#;
+        assert!(matches!(status_error(401, openai), EngineError::AiUnauthorized(m) if m == "Incorrect API key provided."));
+        assert!(matches!(status_error(403, "{}"), EngineError::AiUnauthorized(_)));
+        assert!(matches!(status_error(429, "{}"), EngineError::AiRateLimited(_)));
+        assert!(
+            matches!(status_error(404, r#"{ "error": { "message": "no such model" } }"#), EngineError::AiInvalidResponse(m) if m == "HTTP 404: no such model")
+        );
+        assert!(matches!(status_error(503, "busy"), EngineError::AiUnavailable(m) if m == "HTTP 503: busy"));
+    }
+
+    // ---- the clients against a canned server on localhost -----------------------------------
+
+    /// Answers one connection per canned reply and returns what each request sent (head and
+    /// body, as text), so a test sees the path, the headers and the JSON that left.
+    fn serve(replies: Vec<(u16, &'static str)>) -> (String, std::thread::JoinHandle<Vec<String>>) {
+        use std::io::{Read, Write};
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let base = format!("http://{}", listener.local_addr().unwrap());
+        let handle = std::thread::spawn(move || {
+            let mut seen = Vec::new();
+            for (status, reply) in replies {
+                let (mut stream, _) = listener.accept().unwrap();
+                let mut raw = Vec::new();
+                let mut buf = [0u8; 4096];
+                loop {
+                    let n = stream.read(&mut buf).unwrap();
+                    raw.extend_from_slice(&buf[..n]);
+                    let text = String::from_utf8_lossy(&raw);
+                    if let Some((head, body)) = text.split_once("\r\n\r\n") {
+                        let length = head
+                            .lines()
+                            .find_map(|l| {
+                                l.to_ascii_lowercase()
+                                    .strip_prefix("content-length:")
+                                    .map(|v| v.trim().parse::<usize>().unwrap())
+                            })
+                            .unwrap_or(0);
+                        if body.len() >= length {
+                            break;
+                        }
+                    }
+                    if n == 0 {
+                        break;
+                    }
+                }
+                seen.push(String::from_utf8_lossy(&raw).into_owned());
+                let answer = format!(
+                    "HTTP/1.1 {status} X\r\ncontent-type: application/json\r\ncontent-length: {}\r\nconnection: close\r\n\r\n{reply}",
+                    reply.len()
+                );
+                stream.write_all(answer.as_bytes()).unwrap();
+            }
+            seen
+        });
+        (base, handle)
+    }
+
+    /// A client that talks to the canned server directly, whatever proxy the environment names.
+    fn direct_client() -> reqwest::blocking::Client {
+        reqwest::blocking::Client::builder().no_proxy().build().unwrap()
+    }
+
+    fn sent_json(request: &str) -> serde_json::Value {
+        serde_json::from_str(request.split_once("\r\n\r\n").unwrap().1).unwrap()
+    }
+
+    const OPENAI_OK: &str =
+        r#"{ "model": "gpt-6-luna", "choices": [{ "finish_reason": "stop", "message": { "content": "{\"ok\": true}" } }] }"#;
+
+    #[test]
+    fn the_openai_client_sends_a_bearer_key_and_asks_again_without_an_effort_the_model_refuses() {
+        let (base, server) = serve(vec![
+            (
+                400,
+                r#"{ "error": { "message": "Unsupported parameter: 'reasoning_effort' is not supported with this model." } }"#,
+            ),
+            (200, OPENAI_OK),
+            (401, r#"{ "error": { "message": "Incorrect API key provided." } }"#),
+        ]);
+        let provider = OpenAiProvider {
+            url: openai_url(&base),
+            model: "gpt-6-luna".into(),
+            api_key: "sk-openai-test-key".into(),
+            client: direct_client(),
+        };
+        let answer = provider.complete(&test_request()).unwrap();
+        assert_eq!(answer.json["ok"], true);
+        assert_eq!(answer.model, "gpt-6-luna");
+        assert!(matches!(provider.complete(&test_request()), Err(EngineError::AiUnauthorized(m)) if m.contains("Incorrect API key")));
+        let seen = server.join().unwrap();
+        assert_eq!(seen.len(), 3);
+        for request in &seen {
+            assert!(request.starts_with("POST /v1/chat/completions HTTP/1.1"), "{request}");
+            assert!(request.to_ascii_lowercase().contains("authorization: bearer sk-openai-test-key"));
+        }
+        assert_eq!(sent_json(&seen[0])["reasoning_effort"], "low");
+        assert!(
+            sent_json(&seen[1]).get("reasoning_effort").is_none(),
+            "the second try drops the refused field"
+        );
+        assert_eq!(sent_json(&seen[1])["response_format"]["json_schema"]["strict"], true);
+    }
+
+    #[test]
+    fn the_gemini_client_sends_the_key_as_a_header_and_reads_a_wrong_key_as_unauthorized() {
+        let (base, server) = serve(vec![
+            (
+                200,
+                r#"{ "candidates": [{ "content": { "parts": [{ "text": "{\"ok\": true}" }] }, "finishReason": "STOP" }], "modelVersion": "gemini-3.5-flash-lite" }"#,
+            ),
+            (
+                400,
+                r#"{ "error": { "code": 400, "message": "API key not valid. Please pass a valid API key.", "status": "INVALID_ARGUMENT", "details": [{ "reason": "API_KEY_INVALID" }] } }"#,
+            ),
+            (
+                429,
+                r#"{ "error": { "code": 429, "message": "Quota exceeded.", "status": "RESOURCE_EXHAUSTED" } }"#,
+            ),
+        ]);
+        let settings = AiSettings {
+            provider: AiProviderKind::Gemini,
+            base_url: Some(base),
+            model: String::new(),
+        };
+        let provider = GeminiProvider {
+            client: direct_client(),
+            ..GeminiProvider::new(&settings, "gemini-test-key-123").unwrap()
+        };
+        let answer = provider.complete(&test_request()).unwrap();
+        assert_eq!(answer.json["ok"], true);
+        assert!(matches!(provider.complete(&test_request()), Err(EngineError::AiUnauthorized(m)) if m.contains("API key not valid")));
+        assert!(matches!(provider.complete(&test_request()), Err(EngineError::AiRateLimited(m)) if m == "Quota exceeded."));
+        let seen = server.join().unwrap();
+        assert_eq!(seen.len(), 3, "a wrong key is not asked twice");
+        let first = &seen[0];
+        assert!(
+            first.starts_with("POST /v1beta/models/gemini-3.5-flash-lite:generateContent HTTP/1.1"),
+            "{first}"
+        );
+        assert!(first.to_ascii_lowercase().contains("x-goog-api-key: gemini-test-key-123"));
+        assert!(!first.lines().next().unwrap().contains("gemini-test-key-123"), "never in the URL");
+        assert_eq!(sent_json(first)["generationConfig"]["responseMimeType"], "application/json");
+    }
+
+    #[test]
+    fn provider_for_builds_the_client_the_settings_name() {
+        for kind in AiProviderKind::ALL {
+            let settings = AiSettings {
+                provider: kind,
+                base_url: None,
+                model: String::new(),
+            };
+            assert!(provider_for(&settings, "key").is_ok(), "{kind:?}");
+        }
     }
 
     #[test]

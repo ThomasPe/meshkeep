@@ -238,8 +238,9 @@ no model geometry leaves the machine, deterministic mock provider in test mode.
 - [x] **AI settings & provider layer.** Settings card "AI assistance" with provider,
       base URL, model, key (OS credential store via `keyring`, never `settings.json`),
       a test button and a plain statement of what is sent. Engine: `AiProvider` trait,
-      Anthropic client first (OpenAI-compatible base URL second, local server as a
-      configuration), response cache keyed by input hash in app data, typed errors
+      Anthropic client first, then OpenAI (Chat Completions, which a local
+      OpenAI-compatible server speaks too) and Google Gemini, each with its own key in
+      the credential store; response cache keyed by input hash in app data, typed errors
       (`ai_disabled`, `ai_unauthorized`, `ai_rate_limited`, `ai_invalid_response`).
       Test mode: `MESHKEEP_AI_MOCK` seam with canned answers. Acceptance: no request
       is made without a key; the key is absent from `settings.json`, logs and the

@@ -60,8 +60,8 @@ CI builds and tests the real app there.
 - optional, off by default: load the model page a project came from (Printables,
   Thingiverse, Thangs, MakerWorld) to fill in metadata and the cover picture, for one
   project or a whole selection
-- optional, with your own API key: AI metadata suggestions that you review field by field;
-  model geometry never leaves the machine
+- optional, with your own API key (Anthropic, OpenAI or Google Gemini): AI metadata
+  suggestions that you review field by field; model geometry never leaves the machine
   ([ADR-0003](docs/decisions/0003-ai-integration.md))
 
 **For AI agents**

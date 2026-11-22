@@ -29,9 +29,9 @@ pub type OnChange = Arc<dyn Fn(&[Change]) + Send + Sync>;
 /// Called with the progress of an import an agent started, like the window's own import.
 pub type OnProgress = Arc<dyn Fn(ImportProgress) + Send + Sync>;
 
-/// Reads the AI key from wherever the shell keeps it (the OS credential store), each time
-/// an agent asks for a suggestion; the key is never held here.
-pub type ReadAiKey = Arc<dyn Fn() -> Result<Option<String>, String> + Send + Sync>;
+/// Reads one provider's AI key from wherever the shell keeps it (the OS credential store),
+/// each time an agent asks for a suggestion; the key is never held here.
+pub type ReadAiKey = Arc<dyn Fn(meshkeep_engine::ai::AiProviderKind) -> Result<Option<String>, String> + Send + Sync>;
 
 /// What the app lends the server.
 #[derive(Clone)]
@@ -48,7 +48,7 @@ impl Hooks {
     pub fn changes_only(on_change: OnChange) -> Hooks {
         Hooks {
             on_change,
-            ai_key: Arc::new(|| Ok(None)),
+            ai_key: Arc::new(|_| Ok(None)),
             on_import: Arc::new(|_| {}),
         }
     }
@@ -317,7 +317,7 @@ fn run(
 ) -> Option<serde_json::Value> {
     // the engine is locked inside, and for an import only to plan and to finish
     let outcome = {
-        let ai_key = || (hooks.ai_key)();
+        let ai_key = |provider| (hooks.ai_key)(provider);
         let streaming = notify.is_some();
         let mut relay = |note: serde_json::Value| {
             if let Some(n) = notify.as_mut() {

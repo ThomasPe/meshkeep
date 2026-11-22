@@ -47,6 +47,61 @@ test('settings: the AI card stores endpoint and model, the key only as a flag, a
   await expect(page.getByTestId('ai-test')).toBeDisabled();
 });
 
+test('settings: each provider has its own endpoint, default model and key', async ({ page }) => {
+  await page.goto('/#/settings');
+  const provider = page.getByTestId('ai-provider');
+  const status = page.getByTestId('ai-key-status');
+  const choose = async (id: 'anthropic' | 'openai' | 'gemini') => {
+    await provider.click();
+    await page.getByTestId(`ai-provider-${id}`).click();
+    await expect(provider).toHaveAttribute('data-provider', id);
+  };
+  await expect(provider).toHaveAttribute('data-provider', 'anthropic');
+  await expect(page.getByTestId('ai-model')).toHaveValue('claude-haiku-5-5');
+  await expect(page.getByTestId('ai-base-url')).toHaveAttribute('placeholder', 'https://api.anthropic.com');
+  // a key and a custom endpoint for the first provider
+  await page.getByTestId('ai-base-url').fill('http://localhost:8080');
+  await page.getByTestId('ai-save').click();
+  await expect(page.getByTestId('ai-save')).toBeDisabled();
+  await page.getByTestId('ai-key').fill('sk-ant-mock-key');
+  await page.getByTestId('ai-key-save').click();
+  await expect(status).toHaveAttribute('data-state', 'stored');
+  await expect(status).toContainText('Anthropic');
+
+  // OpenAI: its own endpoint and model, and no key yet, so nothing can be sent
+  await choose('openai');
+  await expect(page.getByTestId('ai-model')).toHaveValue('gpt-6-luna');
+  await expect(page.getByTestId('ai-base-url')).toHaveValue('');
+  await expect(page.getByTestId('ai-base-url')).toHaveAttribute('placeholder', 'https://api.openai.com');
+  await expect(status).toHaveAttribute('data-state', 'missing');
+  await expect(status).toContainText('OpenAI');
+  await expect(page.getByTestId('ai-test')).toBeDisabled();
+  await page.getByTestId('ai-key').fill('sk-openai-mock-key');
+  await page.getByTestId('ai-key-save').click();
+  await expect(status).toHaveAttribute('data-state', 'stored');
+  await page.getByTestId('ai-test').click();
+  await expect(page.getByTestId('ai-test-status')).toHaveAttribute('data-state', 'ok');
+  await expect(page.getByTestId('ai-test-status')).toContainText('gpt-6-luna');
+
+  // Gemini: again its own, and a text half typed for another provider does not carry over
+  await page.getByTestId('ai-model').fill('half-typed');
+  await choose('gemini');
+  await expect(page.getByTestId('ai-model')).toHaveValue('gemini-3.5-flash-lite');
+  await expect(page.getByTestId('ai-base-url')).toHaveAttribute('placeholder', 'https://generativelanguage.googleapis.com');
+  await expect(status).toHaveAttribute('data-state', 'missing');
+  await expect(status).toContainText('Gemini');
+  await expect(page.getByTestId('ai-test-status')).toHaveAttribute('data-state', 'idle');
+
+  // removing one provider's key leaves the others alone
+  await choose('openai');
+  await expect(status).toHaveAttribute('data-state', 'stored');
+  await page.getByTestId('ai-key-remove').click();
+  await expect(status).toHaveAttribute('data-state', 'missing');
+  await choose('anthropic');
+  await expect(status).toHaveAttribute('data-state', 'stored');
+  await expect(page.getByTestId('ai-model')).toHaveValue('claude-haiku-5-5');
+});
+
 test('settings: a rejected key shows up in the connection test', async ({ page }) => {
   await page.goto('/?ai=unauthorized#/settings');
   await page.getByTestId('ai-key').fill('bad-key');

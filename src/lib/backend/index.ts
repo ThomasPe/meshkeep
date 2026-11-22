@@ -133,7 +133,7 @@ export interface Backend {
   checkConventions(rootId: string): Promise<ConventionReport>;
   getAiSettings(): Promise<AiSettingsView>;
   setAiSettings(settings: AiSettings): Promise<AiSettingsView>;
-  /** Stores or (with null / empty) removes the key; resolves to whether a key is stored now. */
+  /** Stores or (with null / empty) removes the key of the configured provider; resolves to whether it has one now. */
   setAiKey(key: string | null): Promise<boolean>;
   /** One tiny request to prove key, endpoint and model work together. */
   testAi(): Promise<AiTestReport>;

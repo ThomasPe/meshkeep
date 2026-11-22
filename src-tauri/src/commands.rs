@@ -5,7 +5,7 @@
 //! pool the request waits and the window keeps painting. Long jobs still go through
 //! `spawn_blocking` so they also stay clear of the async workers.
 use crate::state::{self, AppState};
-use meshkeep_engine::ai::{AiSettings, AiTestReport, MetadataSuggestion};
+use meshkeep_engine::ai::{AiSettings, AiTestReport, MetadataSuggestion, SharedProvider};
 use meshkeep_engine::collections::{Collection, SmartCollection};
 use meshkeep_engine::conventions::{CheckReport, Conventions};
 use meshkeep_engine::diagnostics::{self, DiagnosticsReport};
@@ -255,7 +255,7 @@ fn environment_block(app: &AppHandle, state: &AppState) -> String {
         "previews": { "location": engine.thumb_location(), "stats": engine.thumb_stats().ok() },
         "scanner": { "ignore": engine.ignore_patterns(), "container_dirs": engine.container_dirs() },
         "network": engine.network_settings(),
-        "ai": { "provider": engine.ai_settings().provider, "model": engine.ai_settings().model, "key_stored": state.ai_keys.get().ok().flatten().is_some() },
+        "ai": { "provider": engine.ai_settings().provider, "model": engine.ai_settings().model, "key_stored": state.ai_keys.get(engine.ai_settings().provider).ok().flatten().is_some() },
         "mcp": { "enabled": mcp.enabled, "allow_writes": mcp.allow_writes, "port": mcp.port, "import_dirs": mcp.import_dirs, "status": state.mcp.status(mcp.port) },
     });
     format!(
@@ -1233,14 +1233,37 @@ pub async fn install_update(_app: AppHandle) -> CmdResult<()> {
 
 // ---- AI assistance (ADR-0003) ---------------------------------------------------------
 
-/// The `ai` settings block plus whether a key is stored; the key itself never crosses IPC
-/// in this direction.
+/// The `ai` settings block plus whether a key is stored for its provider and what that
+/// provider's own endpoint is; the key itself never crosses IPC in this direction.
 #[derive(Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct AiSettingsView {
     #[serde(flatten)]
     settings: AiSettings,
     has_key: bool,
+    default_base_url: &'static str,
+}
+
+impl AiSettingsView {
+    fn of(state: &AppState, settings: AiSettings) -> CmdResult<AiSettingsView> {
+        Ok(AiSettingsView {
+            has_key: state.ai_keys.get(settings.provider).map_err(key_err)?.is_some(),
+            default_base_url: settings.provider.default_base_url(),
+            settings,
+        })
+    }
+}
+
+/// The client for one call, with the key stored for the configured provider. The key is read
+/// outside the engine lock (a credential store may ask the user); should the provider change
+/// meanwhile, that key belongs to another service and is dropped, so the call ends as
+/// `ai_disabled` instead of handing it over.
+fn ai_provider(state: &AppState) -> CmdResult<SharedProvider> {
+    let kind = state.engine.lock().unwrap().ai_settings().provider;
+    let key = state.ai_keys.get(kind).map_err(key_err)?;
+    let engine = state.engine.lock().unwrap();
+    let key = key.filter(|_| engine.ai_settings().provider == kind);
+    Ok(engine.ai_provider(key.as_deref())?)
 }
 
 fn key_err(e: String) -> AppError {
@@ -1389,35 +1412,30 @@ pub fn set_network_settings(state: State<AppState>, settings: NetworkSettings) -
 #[tauri::command(async)]
 pub fn get_ai_settings(state: State<AppState>) -> CmdResult<AiSettingsView> {
     let settings = state.engine.lock().unwrap().ai_settings().clone();
-    let has_key = state.ai_keys.get().map_err(key_err)?.is_some();
-    Ok(AiSettingsView { settings, has_key })
+    AiSettingsView::of(&state, settings)
 }
 
 #[tauri::command(async)]
 pub fn set_ai_settings(state: State<AppState>, settings: AiSettings) -> CmdResult<AiSettingsView> {
     let settings = { state.engine.lock().unwrap().set_ai_settings(settings)? };
-    let has_key = state.ai_keys.get().map_err(key_err)?.is_some();
-    Ok(AiSettingsView { settings, has_key })
+    AiSettingsView::of(&state, settings)
 }
 
-/// Stores the key in the OS credential store; `None` or an empty string removes it. Never
-/// logged, never returned.
+/// Stores the key of the configured provider in the OS credential store; `None` or an empty
+/// string removes it. The keys of the other providers stay as they are. Never logged, never
+/// returned.
 #[tauri::command(async)]
 pub fn set_ai_key(state: State<AppState>, key: Option<String>) -> CmdResult<bool> {
-    state.ai_keys.set(key.as_deref()).map_err(key_err)?;
-    Ok(state.ai_keys.get().map_err(key_err)?.is_some())
+    let provider = state.engine.lock().unwrap().ai_settings().provider;
+    state.ai_keys.set(provider, key.as_deref()).map_err(key_err)?;
+    Ok(state.ai_keys.get(provider).map_err(key_err)?.is_some())
 }
 
 /// One tiny request against the configured provider. Runs off the UI thread and outside the
 /// engine lock (only the provider handle is taken under it).
 #[tauri::command]
 pub async fn test_ai(app: AppHandle) -> CmdResult<AiTestReport> {
-    let provider = {
-        let state = app.state::<AppState>();
-        let key = state.ai_keys.get().map_err(key_err)?;
-        let provider = state.engine.lock().unwrap().ai_provider(key.as_deref())?;
-        provider
-    };
+    let provider = ai_provider(&app.state::<AppState>())?;
     tauri::async_runtime::spawn_blocking(move || meshkeep_engine::Engine::ai_run_test(provider.as_ref()))
         .await
         .map_err(|e| AppError {
@@ -1433,10 +1451,9 @@ pub async fn test_ai(app: AppHandle) -> CmdResult<AiTestReport> {
 pub async fn suggest_metadata(app: AppHandle, project_id: String) -> CmdResult<MetadataSuggestion> {
     let (provider, prepared) = {
         let state = app.state::<AppState>();
-        let key = state.ai_keys.get().map_err(key_err)?;
-        let engine = state.engine.lock().unwrap();
-        let provider = engine.ai_provider(key.as_deref())?;
-        (provider, engine.ai_prepare_suggestion(&project_id)?)
+        let provider = ai_provider(&state)?;
+        let prepared = state.engine.lock().unwrap().ai_prepare_suggestion(&project_id)?;
+        (provider, prepared)
     };
     tauri::async_runtime::spawn_blocking(move || meshkeep_engine::ai::run_suggestion(prepared, provider.as_ref()))
         .await

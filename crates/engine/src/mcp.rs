@@ -66,9 +66,9 @@ impl std::fmt::Debug for Deferred {
     }
 }
 
-/// Reads the user's AI key; the engine never stores it (ADR-0003), the shell keeps it in
-/// the OS credential store.
-pub type AiKey<'a> = &'a dyn Fn() -> std::result::Result<Option<String>, String>;
+/// Reads the user's AI key for one provider; the engine never stores it (ADR-0003), the
+/// shell keeps one per provider in the OS credential store.
+pub type AiKey<'a> = &'a dyn Fn(crate::ai::AiProviderKind) -> std::result::Result<Option<String>, String>;
 
 /// What the shell lends the protocol while one message runs.
 #[derive(Default)]
@@ -1207,7 +1207,8 @@ fn prepare_suggestion(engine: &Engine, args: &Value, session: &Session) -> std::
     }
     let id = need_str(args, "project_id")?;
     let key = match session.ai_key {
-        Some(read) => read().map_err(|e| ToolError::Failed(format!("the AI key could not be read: {e}")))?,
+        // the key of the configured service, and of no other
+        Some(read) => read(engine.ai_settings().provider).map_err(|e| ToolError::Failed(format!("the AI key could not be read: {e}")))?,
         None => None,
     };
     let provider = engine.ai_provider(key.as_deref()).map_err(|e| match e {
@@ -2207,7 +2208,7 @@ mod tests {
             assert_eq!(r["result"]["isError"], true, "{r}");
             r["result"]["content"][0]["text"].as_str().unwrap().to_string()
         };
-        let stored = || Ok(Some("sk-test".to_string()));
+        let stored = |_| Ok(Some("sk-test".to_string()));
 
         // off by default: not listed, refused even with a key
         assert!(listed(&mut engine).is_none());
@@ -2224,9 +2225,9 @@ mod tests {
 
         // no key, no request: whether the shell lends no reader, finds no key or cannot read it
         assert!(failure(ask(&mut engine, &id, None)).contains("API key"));
-        assert!(failure(ask(&mut engine, &id, Some(&|| Ok(None)))).contains("API key"));
-        assert!(failure(ask(&mut engine, &id, Some(&|| Ok(Some("  ".into()))))).contains("API key"));
-        assert!(failure(ask(&mut engine, &id, Some(&|| Err("keyring locked".into())))).contains("keyring locked"));
+        assert!(failure(ask(&mut engine, &id, Some(&|_| Ok(None)))).contains("API key"));
+        assert!(failure(ask(&mut engine, &id, Some(&|_| Ok(Some("  ".into()))))).contains("API key"));
+        assert!(failure(ask(&mut engine, &id, Some(&|_| Err("keyring locked".into())))).contains("keyring locked"));
         assert_eq!(mock.calls(), 0);
 
         // with a key the call is deferred, so the shell can make it without the engine lock
@@ -2251,6 +2252,27 @@ mod tests {
         let v = structured(&ask(&mut engine, &id, Some(&stored)).finish().response.unwrap());
         assert_eq!(v["cached"], true);
         assert_eq!(mock.calls(), 1);
+
+        // every provider has its own key: the one asked for is the configured service's
+        let asked = std::cell::Cell::new(None);
+        let only_openai = |kind| {
+            asked.set(Some(kind));
+            Ok((kind == crate::ai::AiProviderKind::OpenAi).then(|| "sk-openai".to_string()))
+        };
+        assert!(failure(ask(&mut engine, &id, Some(&only_openai))).contains("API key"));
+        assert_eq!(asked.get(), Some(crate::ai::AiProviderKind::Anthropic));
+        engine
+            .set_ai_settings(crate::ai::AiSettings {
+                provider: crate::ai::AiProviderKind::OpenAi,
+                base_url: None,
+                model: String::new(),
+            })
+            .unwrap();
+        let v = structured(&ask(&mut engine, &id, Some(&only_openai)).finish().response.unwrap());
+        assert_eq!(asked.get(), Some(crate::ai::AiProviderKind::OpenAi));
+        assert_eq!(v["cached"], false, "another model, another answer");
+        assert_eq!(mock.calls(), 2);
+        engine.set_ai_settings(crate::ai::AiSettings::default()).unwrap();
 
         // inside a batch it runs in place, so the answers keep their order
         let vase = format!("{}:Vase", root.id);

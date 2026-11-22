@@ -3,7 +3,7 @@
 import type { Backend, Unlisten } from './index';
 import { generate3mf, generateObj, generateStl } from '@/lib/mesh/generate';
 import { showcaseLanguage, showcaseProjects, showcaseStl } from './showcase';
-import type { AppError, Collection, FacetCount, FileEntry, FileKind, FileThumb, ThumbLocation, FolderNode, ImportItem, ImportProgress, InboxFile, LibraryChanged, LibraryRoot, ListQuery, Project, ProjectSummary, ScanProgress, SidecarStamp, SmartCollection, TagCount, ThumbJob, UpdateMetadata, HashProgress, AiSettingsView, MetadataSuggestion, Hints, CreatorSuggestion, EnrichProgress, McpAuditEntry, McpSettings, ConventionDeviation, PackProgress, PackReport, ImportReport } from '@/lib/types';
+import type { AppError, Collection, FacetCount, FileEntry, FileKind, FileThumb, ThumbLocation, FolderNode, ImportItem, ImportProgress, InboxFile, LibraryChanged, LibraryRoot, ListQuery, Project, ProjectSummary, ScanProgress, SidecarStamp, SmartCollection, TagCount, ThumbJob, UpdateMetadata, HashProgress, AiProviderKind, AiSettings, AiSettingsView, MetadataSuggestion, Hints, CreatorSuggestion, EnrichProgress, McpAuditEntry, McpSettings, ConventionDeviation, PackProgress, PackReport, ImportReport } from '@/lib/types';
 
 const kindOf = (name: string): FileKind => {
   const ext = name.split('.').pop()?.toLowerCase() ?? '';
@@ -139,12 +139,19 @@ export function createMockBackend(): Backend {
     { at: ago(60 * 26), tool: 'delete_project', projects: [{ id: 'r1:Projects/Calibration/Benchy copy', title: 'Low-Poly Benchy (copy)' }], project_count: 1, args: { project_id: 'r1:Projects/Calibration/Benchy copy' }, failed: 0 },
   ];
   const mintToken = () => 'mk_' + Array.from({ length: 48 }, () => 'abcdef0123456789'[Math.floor(Math.random() * 16)]).join('');
-  const aiSettings: AiSettingsView = { provider: 'anthropic', base_url: null, model: 'claude-haiku-5-5', hasKey: false };
+  const AI_DEFAULTS: Record<AiProviderKind, { baseUrl: string; model: string }> = {
+    anthropic: { baseUrl: 'https://api.anthropic.com', model: 'claude-haiku-5-5' },
+    openai: { baseUrl: 'https://api.openai.com', model: 'gpt-6-luna' },
+    gemini: { baseUrl: 'https://generativelanguage.googleapis.com', model: 'gemini-3.5-flash-lite' },
+  };
+  const aiSettings: AiSettings = { provider: 'anthropic', base_url: null, model: AI_DEFAULTS.anthropic.model };
+  const aiKeys = new Set<AiProviderKind>(); // one key per provider, as in the credential store
+  const aiView = (): AiSettingsView => ({ ...aiSettings, hasKey: aiKeys.has(aiSettings.provider), defaultBaseUrl: AI_DEFAULTS[aiSettings.provider].baseUrl });
   const aiFailure = new URLSearchParams(location.search).get('ai');
   const aiCache = new Map<string, MetadataSuggestion>();
   const aiCall = async () => {
     await delay(250);
-    if (!aiSettings.hasKey) throw err('ai_disabled', 'AI assistance is not set up: no API key');
+    if (!aiKeys.has(aiSettings.provider)) throw err('ai_disabled', 'AI assistance is not set up: no API key');
     if (aiFailure === 'unauthorized') throw err('ai_unauthorized', 'the AI provider rejected the API key: mock');
     if (aiFailure === 'rate_limited') throw err('ai_rate_limited', 'the AI provider is rate-limiting requests: mock');
     if (aiFailure === 'invalid') throw err('ai_invalid_response', 'the AI answer could not be used: mock');
@@ -780,14 +787,14 @@ export function createMockBackend(): Backend {
       return { running: mcp.enabled && !!mcp.token, port: mcp.port, error: mcp.enabled && mcp.port === 7341 ? 'cannot listen on 127.0.0.1:7341: address in use' : null, requests: mcp.enabled ? mcpRequests : 0, rejected: 0, lastRequestAt: mcp.enabled ? new Date().toISOString() : null, exePath: 'C:\\Program Files\\Meshkeep\\meshkeep.exe', downloadsDir: 'C:\\Users\\mock\\Downloads' };
     },
     async setNetworkSettings(s) { network.fetch_model_pages = !!s.fetch_model_pages; return { ...network }; },
-    async getAiSettings() { return { ...aiSettings }; },
+    async getAiSettings() { return aiView(); },
     async setAiSettings(s) {
       const base = (s.base_url ?? '').trim().replace(/\/+$/, '');
       if (base && !/^https?:\/\//.test(base)) throw err('not_allowed', `base URL must start with http:// or https://: ${base}`);
-      aiSettings.base_url = base || null; aiSettings.model = s.model.trim() || 'claude-haiku-5-5';
-      return { ...aiSettings };
+      aiSettings.provider = s.provider; aiSettings.base_url = base || null; aiSettings.model = s.model.trim() || AI_DEFAULTS[s.provider].model;
+      return aiView();
     },
-    async setAiKey(key) { aiSettings.hasKey = !!(key && key.trim()); return aiSettings.hasKey; },
+    async setAiKey(key) { if (key && key.trim()) aiKeys.add(aiSettings.provider); else aiKeys.delete(aiSettings.provider); return aiKeys.has(aiSettings.provider); },
     async testAi() { await aiCall(); return { model: aiSettings.model }; },
     async suggestMetadata(projectId) {
       await aiCall();

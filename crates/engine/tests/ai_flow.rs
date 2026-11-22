@@ -2,7 +2,7 @@
 //! schema validation, the response cache, the error mapping and the promise that the key
 //! never lands in `settings.json`.
 
-use meshkeep_engine::ai::{AiSettings, MockMode, MockProvider};
+use meshkeep_engine::ai::{AiProviderKind, AiSettings, MockMode, MockProvider};
 use meshkeep_engine::model::{ListQuery, SyncMode};
 use meshkeep_engine::{Engine, EngineError, UpdateMetadata};
 use std::fs;
@@ -89,6 +89,25 @@ fn no_key_means_no_call_and_the_key_stays_out_of_settings() {
         }),
         Err(EngineError::NotAllowed(_))
     ));
+
+    // another provider is a setting like the others: an empty model becomes that provider's
+    // own default, and the choice survives a restart
+    for kind in AiProviderKind::ALL {
+        let saved = engine
+            .set_ai_settings(AiSettings {
+                provider: kind,
+                base_url: None,
+                model: String::new(),
+            })
+            .unwrap();
+        assert_eq!(saved.model, kind.default_model());
+        assert_eq!(saved.effective_base_url(), kind.default_base_url());
+        let reopened = Engine::open(data.path()).unwrap();
+        assert_eq!(reopened.ai_settings().provider, kind);
+        let text = fs::read_to_string(data.path().join("settings.json")).unwrap();
+        assert!(text.contains(&format!("\"provider\": \"{}\"", kind.id())), "{text}");
+        assert!(!text.contains(secret));
+    }
 }
 
 #[test]
