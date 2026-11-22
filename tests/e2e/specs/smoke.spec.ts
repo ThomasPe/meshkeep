@@ -319,6 +319,12 @@ describe('Meshkeep (library changed outside the app)', () => {
   it('reads the root again when a project folder is gone and tells the user', async () => {
     const from = path.join(fixture(), 'Gridfinity', 'Baseplates');
     const to = path.join(fixture(), 'Gridfinity', 'Baseplates moved');
+    // Start from an index that matches the disk and from a window without a notice: earlier
+    // tests remove folders behind the app's back, which is the same repair (and the same toast).
+    const notice = () => $('//*[contains(text(), "changed outside Meshkeep")]');
+    const rootId = (await browser.tauri.execute(({ core }) => core.invoke('get_roots')) as Array<{ id: string }>)[0]!.id;
+    await browser.tauri.execute(({ core }, id) => core.invoke('scan_root', { id }), rootId);
+    await notice().waitForDisplayed({ reverse: true, timeout: 20000, timeoutMsg: 'an earlier notice did not go away' });
     const old = (await list()).find((p) => p.rel_path === 'Gridfinity/Baseplates');
     expect(old).toBeDefined();
     fs.renameSync(from, to);
@@ -329,7 +335,7 @@ describe('Meshkeep (library changed outside the app)', () => {
         const now = await list();
         return now.some((p) => p.rel_path === 'Gridfinity/Baseplates moved') && !now.some((p) => p.id === old!.id);
       }, { timeout: 20000, timeoutMsg: 'the root was not read again' });
-      await $('//*[contains(text(), "changed outside Meshkeep")]').waitForDisplayed({ timeout: 10000, timeoutMsg: 'no notice about the change' });
+      await notice().waitForDisplayed({ timeout: 10000, timeoutMsg: 'no notice about the change' });
       const roots = await browser.tauri.execute(({ core }) => core.invoke('get_roots')) as Array<{ id: string; last_scan: { trigger: string } | null }>;
       expect(roots.find((r) => r.id === old!.root_id)?.last_scan?.trigger).toBe('resync');
     } finally {

@@ -95,7 +95,7 @@ submission is outside the code: Partner Center identity values, screenshots
 - [x] **Changes made outside the app** (LIB-3): watched roots are read again at start
       (`state::spawn_startup_sync`); a project folder or file that is gone from an online
       root triggers a rescan of that root and a toast (`Engine::stale_root`,
-      `state::repair_root`). These scans read the disk without the engine lock
+      `state::repair_root`; a repair that did not help pauses the root for 30 s). These scans read the disk without the engine lock
       (`SharedEngine::scan_root`) and read again if the index was written meanwhile.
 - [x] **Offline handling** (LIB-5).
 - [x] **Sync status & background activity** (LIB-6, LIB-7, APP-7): per-root last scan

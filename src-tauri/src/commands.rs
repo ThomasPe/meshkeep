@@ -375,7 +375,7 @@ pub fn get_project(app: AppHandle, state: State<AppState>, id: String) -> CmdRes
         (engine.get_project(&id)?, engine.stale_root(&id, None))
     };
     if let Some(root_id) = stale {
-        state::repair_root(&app, &root_id);
+        state::repair_root(&app, &root_id, &id, None);
     }
     Ok(project)
 }
@@ -430,7 +430,7 @@ pub async fn read_project_file(app: AppHandle, project_id: String, rel_path: Str
         Err((e, stale)) => {
             // an indexed file that is gone: the library changed outside the app
             if let Some(root_id) = stale {
-                state::repair_root(&app, &root_id);
+                state::repair_root(&app, &root_id, &project_id, Some(&rel_path));
             }
             return Err(e.into());
         }
