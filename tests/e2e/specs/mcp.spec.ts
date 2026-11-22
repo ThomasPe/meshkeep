@@ -57,7 +57,7 @@ describe('Meshkeep MCP server (real app, real socket)', () => {
 
   it('serves an agent: resources, progress as a stream, the AI suggestion behind its switch, and lists what it changed', async () => {
     await $('[data-testid="app"]').waitForDisplayed({ timeout: 30000 });
-    await browser.url(await browser.getUrl().then((u) => u.split('#')[0] + '#/settings'));
+    await browser.url(await browser.getUrl().then((u) => u.split('#')[0] + '#/settings/mcp'));
     await $('[data-testid="settings"]').waitForDisplayed({ timeout: 20000 });
 
     // a port of our own, then the server; the token comes from the card
@@ -129,6 +129,9 @@ describe('Meshkeep MCP server (real app, real socket)', () => {
       expect(off.isError).toBe(true);
       expect(off.content[0].text).toContain('AI suggestions for agents are off');
       await switchOn('mcp-ai');
+      // the key lives in another area of the settings
+      await $('[data-testid="settings-nav-ai"]').click();
+      await $('[data-testid="ai-key-status"]').waitForDisplayed({ timeout: 10000 });
       if ((await $('[data-testid="ai-key-status"]').getAttribute('data-state')) !== 'stored') {
         const noKey = await tool('suggest_metadata', { project_id: project.id });
         expect(noKey.isError).toBe(true);
@@ -137,6 +140,8 @@ describe('Meshkeep MCP server (real app, real socket)', () => {
         await $('[data-testid="ai-key-save"]').click();
         await browser.waitUntil(async () => (await $('[data-testid="ai-key-status"]').getAttribute('data-state')) === 'stored', { timeout: 10000 });
       }
+      await $('[data-testid="settings-nav-mcp"]').click();
+      await $('[data-testid="mcp-audit-entry"]').waitForDisplayed({ timeout: 10000 });
       const yamlBefore = fs.readFileSync(sidecar, 'utf8');
       const suggestion = await tool('suggest_metadata', { project_id: project.id });
       expect(suggestion.isError).toBe(false);
@@ -155,6 +160,7 @@ describe('Meshkeep MCP server (real app, real socket)', () => {
       // leave the fixture and the settings as they were: the other specs share this app
       fs.rmSync(sidecar, { force: true });
       await tool('scan_root', { root_id: project.id.split(':')[0] });
+      await $('[data-testid="settings-nav-mcp"]').click();
       await switchOff('mcp-ai');
       await switchOff('mcp-writes');
       await switchOff('mcp-toggle');

@@ -1,11 +1,19 @@
 import { useEffect, useState } from 'react';
 
-export type Route = { page: 'welcome' } | { page: 'library' } | { page: 'project'; id: string } | { page: 'settings' };
+/** The areas of the settings screen, in the order its navigation shows them. The first one is the default. */
+export const SETTINGS_SECTIONS = ['library', 'general', 'ai', 'mcp', 'about'] as const;
+export type SettingsSection = (typeof SETTINGS_SECTIONS)[number];
+
+export type Route = { page: 'welcome' } | { page: 'library' } | { page: 'project'; id: string } | { page: 'settings'; section?: SettingsSection };
 
 export function parseRoute(hash: string): Route {
   const h = hash.replace(/^#\/?/, '');
   if (h.startsWith('project/')) return { page: 'project', id: decodeURIComponent(h.slice('project/'.length)) };
-  if (h === 'settings') return { page: 'settings' };
+  if (h === 'settings' || h.startsWith('settings/')) {
+    // an unknown area (an old link, a typo) opens the default one instead of leaving the screen
+    const section = SETTINGS_SECTIONS.find((x) => x === h.slice('settings/'.length));
+    return section ? { page: 'settings', section } : { page: 'settings' };
+  }
   if (h === 'welcome') return { page: 'welcome' };
   return { page: 'library' };
 }
@@ -13,7 +21,7 @@ export function parseRoute(hash: string): Route {
 export function routeHref(r: Route): string {
   switch (r.page) {
     case 'project': return `#/project/${encodeURIComponent(r.id)}`;
-    case 'settings': return '#/settings';
+    case 'settings': return r.section ? `#/settings/${r.section}` : '#/settings';
     case 'welcome': return '#/welcome';
     default: return '#/library';
   }

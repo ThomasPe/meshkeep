@@ -53,7 +53,7 @@ function Shell() {
   const page =
     route.page === 'welcome' ? <WelcomePage onScanEnd={scanEnd} /> :
     route.page === 'project' ? <ProjectPage id={route.id} /> :
-    route.page === 'settings' ? <SettingsPage scanning={scanning} onScanEnd={scanEnd} /> :
+    route.page === 'settings' ? <SettingsPage section={route.section} scanning={scanning} onScanEnd={scanEnd} /> :
     <LibraryPage scanning={scanning} onScanEnd={scanEnd} />;
   // The navigation sidebar belongs to the shell (NAV-1): it stays put while a project is open,
   // so the tree, collections and tags keep showing where you are. Welcome and Settings are

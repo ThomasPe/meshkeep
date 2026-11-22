@@ -79,9 +79,10 @@ describe('Meshkeep (test mode, fixture library)', () => {
   it('settings shows the isolated data dir and test mode', async () => {
     await $('[data-testid="nav-settings"]').click();
     await $('[data-testid="settings"]').waitForDisplayed();
+    expect(await $('[data-testid="root-scan-summary"]').getText()).toMatch(/^\d+ projects · \d+ files/);
+    await $('[data-testid="settings-nav-about"]').click();
     const dir = await $('[data-testid="data-dir"]').getText();
     expect(dir).toContain('meshkeep-e2e-');
-    expect(await $('[data-testid="root-scan-summary"]').getText()).toMatch(/^\d+ projects · \d+ files/);
     const info = await browser.tauri.execute(({ core }) => core.invoke('app_info')) as { testMode: boolean; e2eBuild: boolean };
     expect(info.testMode).toBe(true);
     expect(info.e2eBuild).toBe(true);
@@ -91,6 +92,7 @@ describe('Meshkeep (test mode, fixture library)', () => {
     // MESHKEEP_PICK_SAVE_DIR answers the folder picker with the isolated data dir
     const saveDir = process.env.MESHKEEP_E2E_DATA_DIR!;
     await $('[data-testid="nav-settings"]').click();
+    await $('[data-testid="settings-nav-about"]').click();
     await $('[data-testid="export-diagnostics"]').click();
     const status = $('[data-testid="diagnostics-status"]');
     await browser.waitUntil(async () => (await status.getAttribute('data-state')) === 'written', { timeout: 15000 });

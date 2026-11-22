@@ -81,7 +81,7 @@
 | APP-1 | Runs on Windows (primary). macOS support is a stretch goal; Linux is out of scope for v1 (Q1). | MVP |
 | APP-2 | Light, dark and system theme. | MVP |
 | APP-3 | All user-facing text is localizable; English and German at launch, further languages after the Store release via community translations (Q13). | MVP |
-| APP-4 | Settings: library roots, ignore patterns, thumbnail location, sync intervals, theme, language, notifications. | MVP |
+| APP-4 | Settings: library roots, ignore patterns, thumbnail location, sync intervals, theme, language, notifications. The screen is divided into areas with a navigation on the left (Library, General, AI & network, Agents (MCP), About & support); each area has its own address, so the app can lead to the setting it means. | MVP |
 | APP-5 | Keyboard shortcuts for core actions (search, delete, rename, navigate) with a central, configurable keymap. The central key map (`src/lib/hotkeys.ts`) and the library shortcuts exist (#68: select all in view, open, rename, delete, clear selection, search; listed in Settings); arrow-key navigation in the grid and a user-configurable keymap are still open. | Later |
 | APP-6 | Undo/redo for disk operations (rename, move, tag) via inverse operations. | Later |
 | APP-7 | Notifications for import errors, sync failures and completed background jobs. | MVP |
