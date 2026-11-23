@@ -93,7 +93,9 @@ stdout; engine code logs through `tracing` (the `log` bridge is on). `src-tauri/
 logs panics before the default hook. The engine is shared as `SharedEngine`
 (`crates/engine/src/lock.rs`): `lock()` works like a mutex but warns, with the caller's
 location, when a wait or a hold exceeds a second. Keep heavy work out of the lock, and keep
-sync commands on `#[tauri::command(async)]` so the window thread never waits for it. MCP
+sync commands on `#[tauri::command(async)]` so the window thread never waits for it. A scan
+the shell starts on its own (at start, after a missing folder) goes through
+`SharedEngine::scan_root`, which reads the disk without the lock. MCP
 write tools log one line each (`crates/engine/src/mcp.rs`). The Settings Diagnostics card
 exports a zip (`crates/engine/src/diagnostics.rs`: logs, redacted `settings.json` and
 `roots.json`, environment, data-dir listing); secrets are redacted by key name and user

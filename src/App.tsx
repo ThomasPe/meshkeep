@@ -30,7 +30,8 @@ function Shell() {
   const roots = useRoots();
   const [scanning, setScanning] = useState<ScanState>({});
   const onScan = useCallback((rootId: string, found: number) => setScanning((s) => ({ ...s, [rootId]: found })), []);
-  useBackendEvents(onScan);
+  const scanEnd = useCallback((rootId: string) => setScanning((s) => { const n = { ...s }; delete n[rootId]; return n; }), []);
+  useBackendEvents(onScan, scanEnd);
   useEffect(() => { wireImportEvents(); }, []);
   const info = useAppInfo();
   useStartupUpdateCheck(info.data);
@@ -40,7 +41,6 @@ function Shell() {
     if (!isTauri || import.meta.env.DEV || info.data?.testMode) return;
     return installNativeShellGuards({ allowDevtools: info.data?.channel === 'dev' });
   }, [info.data?.testMode, info.data?.channel]);
-  const scanEnd = useCallback((rootId: string) => setScanning((s) => { const n = { ...s }; delete n[rootId]; return n; }), []);
   const { scan } = useLibraryActions(scanEnd);
   const groupRef = useRef<HTMLDivElement | null>(null);
   const panels = useMemo(() => loadPanels<{ sidebar: number }>(SHELL_LAYOUT_KEY), []);

@@ -34,7 +34,7 @@ mod engine;
 pub use engine::{
     BatchFailure, BatchReport, BatchUpdate, CreatorSuggestion, CreatorSuggestions, Deleter, DuplicateGroup, DuplicateKind, DuplicateMember,
     DuplicateReport, Engine, HashProgress, ImportPlan, MoveFilesDest, MoveFilesReport, MoveReport, OrganizeReport, PackProgress,
-    PackReport, PromoteFailure, PromoteItem, PromoteReport, ScanProgress, SharedFile, UpdateMetadata,
+    PackReport, PromoteFailure, PromoteItem, PromoteReport, ScanJob, ScanProgress, ScanWalk, SharedFile, UpdateMetadata,
 };
 pub use error::{EngineError, Result};
 pub use lock::SharedEngine;

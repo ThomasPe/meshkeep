@@ -57,6 +57,9 @@
     "clearFilters": "Clear filters",
     "rescan": "Rescan",
     "scanning": "Scanning… {{count}} projects found",
+    "changedOutside": "This folder was changed outside Meshkeep",
+    "changedOutsideHint_one": "It was read again: {{count}} project.",
+    "changedOutsideHint_other": "It was read again: {{count}} projects.",
     "offline": "Offline",
     "unknownCreator": "Unknown creator",
     "files_one": "{{count}} file",
@@ -175,6 +178,7 @@
   },
   "project": {
     "back": "Library",
+    "gone": "This project is not here any more. It was moved, renamed or deleted.",
     "overview": "Overview",
     "files": "Files",
     "metadata": "Metadata",
@@ -328,7 +332,8 @@
       "watch": "file change",
       "poll": "poll",
       "import": "import",
-      "startup": "startup"
+      "startup": "startup",
+      "resync": "missing folder"
     },
     "thumbLocation": "Store previews in",
     "thumbLocationApp": "App data",

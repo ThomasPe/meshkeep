@@ -86,8 +86,13 @@ export function patchProject(qc: QueryClient, id: string, patch: Partial<Project
   for (const q of stale) q.invalidate();
 }
 
-/** Subscribes once to backend events and keeps the query cache fresh. */
-export function useBackendEvents(onScan?: (rootId: string, found: number) => void) {
+/**
+ * Subscribes once to backend events and keeps the query cache fresh. Scans the backend starts
+ * on its own report through `onScan` and end with `onScanEnd`: the catch-up of watched folders
+ * at start (`startup`), and the repair after a project folder or file turned out to be gone
+ * (`resync`), which also tells the user why the library just changed.
+ */
+export function useBackendEvents(onScan?: (rootId: string, found: number) => void, onScanEnd?: (rootId: string) => void) {
   const qc = useQueryClient();
   useEffect(() => {
     let dead = false;
@@ -101,6 +106,8 @@ export function useBackendEvents(onScan?: (rootId: string, found: number) => voi
         if (e.reason === 'delete' && e.oldId) qc.removeQueries({ queryKey: keys.project(e.oldId) });
         if (e.reason === 'move') for (const id of e.oldIds ?? []) qc.removeQueries({ queryKey: keys.project(id) });
         if (e.reason === 'thumbs_cleared') { useThumbs.setState({ fresh: {} }); forgetAllFileThumbs(); }
+        if ((e.reason === 'startup' || e.reason === 'resync') && e.rootId) onScanEnd?.(e.rootId);
+        if (e.reason === 'resync' && e.report) toast.info(i18n.t('library.changedOutside'), { description: i18n.t('library.changedOutsideHint', { count: e.report.projects }), duration: 10_000 });
         void kickThumbQueue();
       });
       const c = await b.onProjectChanged((e) => { qc.invalidateQueries({ queryKey: keys.project(e.projectId) }); qc.invalidateQueries({ queryKey: ['mcpAudit'] }); qc.invalidateQueries({ queryKey: ['projects'] }); qc.invalidateQueries({ queryKey: ['tags'] }); qc.invalidateQueries({ queryKey: ['facets'] }); qc.invalidateQueries({ queryKey: keys.stats }); void kickThumbQueue(); });
@@ -108,7 +115,11 @@ export function useBackendEvents(onScan?: (rootId: string, found: number) => voi
       const d = await b.onCollectionsChanged(() => { qc.invalidateQueries({ queryKey: keys.collections }); qc.invalidateQueries({ queryKey: keys.smart }); qc.invalidateQueries({ queryKey: ['projects'] }); qc.invalidateQueries({ queryKey: ['smartProjects'] }); });
       const i = await b.onInboxChanged((e) => { qc.invalidateQueries({ queryKey: keys.inbox(e.rootId) }); });
       const w = await b.onWatchError((e) => { qc.invalidateQueries({ queryKey: keys.roots }); toast.warning(i18n.t('status.watchError'), { description: e.message, duration: 12_000 }); });
-      if (dead) { a(); c(); s(); d(); i(); w(); } else unlisten.push(a, c, s, d, i, w);
+      if (dead) { a(); c(); s(); d(); i(); w(); return; }
+      unlisten.push(a, c, s, d, i, w);
+      // the catch-up scan at start runs while the window loads: if it ended before anyone
+      // listened here, its event is gone and the first lists may predate it
+      invalidateLibrary(qc);
     });
     // Thumbnails: patch cards as PNGs land, and refetch lists once a batch settles.
     import('@/lib/thumbs/queue').then(({ startThumbnails }) => {
@@ -120,7 +131,7 @@ export function useBackendEvents(onScan?: (rootId: string, found: number) => voi
       });
     });
     return () => { dead = true; unlisten.forEach((u) => u()); if (flush) clearTimeout(flush); };
-  }, [qc, onScan]);
+  }, [qc, onScan, onScanEnd]);
 }
 
 /** META-6: one metadata change for a multi-selection; the backend emits per-project events. */
