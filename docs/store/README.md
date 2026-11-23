@@ -75,11 +75,12 @@ produced by `release.yml` on tags. Store builds have no updater at all.
 
 `.github/workflows/release.yml` runs on every `v*` tag:
 
-0. **Identity gate.** Before anything is built, `msix/check-store-identity.ps1` checks the
-   three repository variables with the Partner Center identity (below). A tag without
-   them, or with a publisher that does not start with `CN=`, fails the run at once: the
-   workflow used to fall back to the side-load identity and attach a "Store" MSIX that
-   Partner Center rejects on upload. A manual run from a branch ("Run workflow") only warns
+0. **Store gate.** Before anything is built, `msix/check-store-identity.ps1` checks the
+   three repository variables with the Partner Center identity (below) and the package
+   version. A tag without the variables, with a publisher that does not start with `CN=`,
+   or with a version whose first part is 0 fails the run at once: the workflow used to
+   fall back to the side-load identity, and a tag `v0.1.0` would have produced a package
+   `0.1.0.0`; Partner Center rejects both on upload. A manual run from a branch ("Run workflow") only warns
    and packs with the side-load identity, which is enough to try the pipeline. CI runs the
    gate's cases on every push (`msix/check-store-identity.test.ps1`).
 1. **Private installer.** `tauri-apps/tauri-action` builds the NSIS installer. When the
@@ -214,7 +215,9 @@ product identity is known since 2026-11-23 (below).
 
 ## Versioning
 
-The MSIX version has four parts and must increase with every submission. The scripts use
+The MSIX version has four parts and must increase with every submission. The Store
+accepts it only when the first part is 1 or higher and the fourth is 0 (reserved for the
+Store), which is why the first release is 1.0.0 and not 0.1.0. The scripts use
 `<package.json version>.0` by default; the release workflow derives it from the tag
-(`v0.2.1` → `0.2.1.0`). Bump `version` in `package.json`, `src-tauri/tauri.conf.json` and
+(`v1.2.1` → `1.2.1.0`) and its gate rejects a tag that breaks the rule. Bump `version` in `package.json`, `src-tauri/tauri.conf.json` and
 `Cargo.toml` together before tagging.

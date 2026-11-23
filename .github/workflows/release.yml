@@ -23,12 +23,22 @@ jobs:
     steps:
       - uses: actions/checkout@v5
 
-      # 0. Before anything is built: a tag without the Partner Center identity stops here,
-      #    instead of attaching a "Store" MSIX with the side-load identity to the release.
-      #    A manual run from a branch only warns (msix/check-store-identity.ps1).
-      - name: Partner Center identity
+      - name: Version from tag
+        id: ver
+        run: |
+          $v = "${{ github.ref_name }}".TrimStart('v')
+          if ($v -notmatch '^\d+\.\d+\.\d+$') { $v = (Get-Content package.json -Raw | ConvertFrom-Json).version }
+          "version=$v" >> $env:GITHUB_OUTPUT
+          "msix=$v.0" >> $env:GITHUB_OUTPUT
+
+      # 0. Before anything is built: a tag stops here when its Store MSIX could not be
+      #    submitted, because the Partner Center identity is missing or the version is one
+      #    the Store rejects (first part 0). A manual run from a branch only warns
+      #    (msix/check-store-identity.ps1).
+      - name: Store release gate (identity and version)
         id: identity
         env:
+          MSIX_VERSION: ${{ steps.ver.outputs.msix }}
           MSIX_IDENTITY_NAME: ${{ vars.MSIX_IDENTITY_NAME }}
           MSIX_PUBLISHER: ${{ vars.MSIX_PUBLISHER }}
           MSIX_PUBLISHER_DISPLAY_NAME: ${{ vars.MSIX_PUBLISHER_DISPLAY_NAME }}
@@ -40,14 +50,6 @@ jobs:
       - uses: Swatinem/rust-cache@v2
         with: { key: release-windows }
       - run: npm ci
-
-      - name: Version from tag
-        id: ver
-        run: |
-          $v = "${{ github.ref_name }}".TrimStart('v')
-          if ($v -notmatch '^\d+\.\d+\.\d+$') { $v = (Get-Content package.json -Raw | ConvertFrom-Json).version }
-          "version=$v" >> $env:GITHUB_OUTPUT
-          "msix=$v.0" >> $env:GITHUB_OUTPUT
 
       # 1. Private build: NSIS installer. With signing secrets the updater is compiled in and
       #    tauri-action publishes latest.json + .sig next to the installer.

@@ -5,7 +5,7 @@
 $ErrorActionPreference = "Stop"
 $check = Join-Path $PSScriptRoot "check-store-identity.ps1"
 $shell = (Get-Process -Id $PID).Path
-$names = @("MSIX_IDENTITY_NAME", "MSIX_PUBLISHER", "MSIX_PUBLISHER_DISPLAY_NAME", "GITHUB_REF_TYPE", "GITHUB_OUTPUT")
+$names = @("MSIX_IDENTITY_NAME", "MSIX_PUBLISHER", "MSIX_PUBLISHER_DISPLAY_NAME", "MSIX_VERSION", "GITHUB_REF_TYPE", "GITHUB_OUTPUT")
 $identity = @{
   MSIX_IDENTITY_NAME          = "12345DevSym.Meshkeep"
   MSIX_PUBLISHER              = "CN=0A1B2C3D-0000-4000-8000-000000000000"
@@ -67,6 +67,28 @@ $guidOnly = $identity.Clone()
 $guidOnly["MSIX_PUBLISHER"] = "0A1B2C3D-0000-4000-8000-000000000000"
 $r = Invoke-Check $guidOnly "tag"
 Expect "a publisher without CN= stops the release" ($r.Code -eq 1 -and $r.Output -match "configured=false" -and $r.Log -match "starts with 'CN='") $r
+
+$versioned = $identity.Clone()
+$versioned["MSIX_VERSION"] = "1.0.0.0"
+$r = Invoke-Check $versioned "tag"
+Expect "a tag with the identity and version 1.0.0.0 passes" ($r.Code -eq 0 -and $r.Output -match "configured=true" -and $r.Log -notmatch "::(error|warning)") $r
+
+$zero = $identity.Clone()
+$zero["MSIX_VERSION"] = "0.1.0.0"
+$r = Invoke-Check $zero "tag"
+Expect "a tag whose version starts with 0 stops the release" ($r.Code -eq 1 -and $r.Output -match "configured=true" -and $r.Log -match "::error" -and $r.Log -match "0\.1\.0\.0 is not accepted") $r
+
+$r = Invoke-Check $zero "branch"
+Expect "a manual run with such a version only warns" ($r.Code -eq 0 -and $r.Output -match "configured=true" -and $r.Log -match "::warning" -and $r.Log -notmatch "::error") $r
+
+$revision = $identity.Clone()
+$revision["MSIX_VERSION"] = "1.2.3.4"
+$r = Invoke-Check $revision "tag"
+Expect "a fourth part other than 0 stops the release" ($r.Code -eq 1 -and $r.Log -match "1\.2\.3\.4 is not accepted") $r
+
+$both = @{ MSIX_VERSION = "0.1.0.0" }
+$r = Invoke-Check $both "tag"
+Expect "a tag with both problems names both" ($r.Code -eq 1 -and $r.Output -match "configured=false" -and $r.Log -match "identity not configured" -and $r.Log -match "is not accepted") $r
 
 if ($script:failed -gt 0) { throw "$($script:failed) case(s) of the Store identity check failed" }
 Write-Host "Store identity check: all cases OK"
