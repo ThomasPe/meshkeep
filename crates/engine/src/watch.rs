@@ -62,6 +62,17 @@ pub struct PresenceChange {
     pub back: Vec<String>,
 }
 
+/// What one look at a watched root's folder means for its watcher.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Seen {
+    /// As before: there and watched, or still gone.
+    Unchanged,
+    /// Just dropped out: stop its watcher.
+    Lost,
+    /// Back after being gone: start a watcher and catch up.
+    Back,
+}
+
 impl WatchPresence {
     /// A watcher could not be started because the root's folder is not there.
     pub fn mark_lost(&mut self, root_id: &str) {
@@ -72,18 +83,35 @@ impl WatchPresence {
         self.lost.contains(root_id)
     }
 
-    /// `seen` is every root in watch mode right now and whether its folder is reachable.
-    /// Roots that are no longer watched (removed, switched to another mode) are forgotten.
+    /// One root's folder was looked at. Roots are looked at independently of each other, so
+    /// a share that takes long to answer holds up nobody else.
+    pub fn see(&mut self, root_id: &str, reachable: bool) -> Seen {
+        if reachable {
+            if self.lost.remove(root_id) {
+                return Seen::Back;
+            }
+        } else if self.lost.insert(root_id.to_string()) {
+            return Seen::Lost;
+        }
+        Seen::Unchanged
+    }
+
+    /// Forgets roots that are no longer watched (removed, switched to another mode).
+    pub fn retain(&mut self, watched: &[String]) {
+        self.lost.retain(|id| watched.contains(id));
+    }
+
+    /// `seen` is every root in watch mode right now and whether its folder is reachable:
+    /// `retain` and `see` for all of them at once.
     pub fn update(&mut self, seen: &[(String, bool)]) -> PresenceChange {
-        self.lost.retain(|id| seen.iter().any(|(s, _)| s == id));
+        let watched: Vec<String> = seen.iter().map(|(id, _)| id.clone()).collect();
+        self.retain(&watched);
         let mut change = PresenceChange::default();
         for (id, reachable) in seen {
-            if *reachable {
-                if self.lost.remove(id) {
-                    change.back.push(id.clone());
-                }
-            } else if self.lost.insert(id.clone()) {
-                change.lost.push(id.clone());
+            match self.see(id, *reachable) {
+                Seen::Lost => change.lost.push(id.clone()),
+                Seen::Back => change.back.push(id.clone()),
+                Seen::Unchanged => {}
             }
         }
         change
@@ -124,6 +152,13 @@ mod tests {
         // a root that was unreachable when its watcher should have started (app start)
         p.mark_lost("a");
         assert_eq!(p.update(&seen(true, true)).back, ["a"]);
+
+        // one root at a time, as the shell looks at them
+        assert_eq!(p.see("a", false), Seen::Lost);
+        assert_eq!(p.see("a", false), Seen::Unchanged);
+        assert_eq!(p.see("b", true), Seen::Unchanged, "another root is not touched by it");
+        assert_eq!(p.see("a", true), Seen::Back);
+        assert_eq!(p.see("a", true), Seen::Unchanged);
 
         // a lost root that is no longer watched is forgotten, also if it is watched again later
         p.mark_lost("b");
