@@ -16,14 +16,27 @@ describe('folder tree order (#74)', () => {
   ];
 
   it('is case-insensitive, natural and locale-aware on the top level', () => {
-    expect(names(sortFolderTree(engine, 'de'))).toEqual(['apfel', 'Örtchen', 'Part 2', 'Part 10', 'Zahnrad']);
-    expect(names(sortFolderTree(engine, 'en'))).toEqual(['apfel', 'Örtchen', 'Part 2', 'Part 10', 'Zahnrad']);
+    // "Zahnrad" is the only folder of the level, so it leads; the projects follow by name
+    expect(names(sortFolderTree(engine, 'de'))).toEqual(['Zahnrad', 'apfel', 'Örtchen', 'Part 2', 'Part 10']);
+    expect(names(sortFolderTree(engine, 'en'))).toEqual(['Zahnrad', 'apfel', 'Örtchen', 'Part 2', 'Part 10']);
   });
 
   it('orders the projects below a folder the same way', () => {
     const zahnrad = sortFolderTree(engine, 'de').find((n) => n.name === 'Zahnrad')!;
     expect(names(zahnrad.children)).toEqual(['Ärmel', 'b-Teil', 'V9', 'V10']);
     expect(zahnrad.children.map((n) => n.rel_path)).toEqual(['Zahnrad/Ärmel', 'Zahnrad/b-Teil', 'Zahnrad/V9', 'Zahnrad/V10']);
+  });
+
+  it('lists the folders of a level first and its projects below them (#170)', () => {
+    const mixed = [
+      node('Adapter'),
+      node('Zubehör', [node('Zubehör/Clip'), node('Zubehör/Alt', [node('Zubehör/Alt/Halter')]), node('Zubehör/Bügel')]),
+      node('Benchy'),
+      node('Archiv', [node('Archiv/Vase')]),
+    ];
+    const sorted = sortFolderTree(mixed, 'de');
+    expect(names(sorted)).toEqual(['Archiv', 'Zubehör', 'Adapter', 'Benchy']);
+    expect(names(sorted[1]!.children)).toEqual(['Alt', 'Bügel', 'Clip']);
   });
 
   it('leaves the input alone and is stable for names that differ in case only', () => {
