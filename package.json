@@ -2,7 +2,7 @@
   "name": "meshkeep",
   "productName": "Meshkeep",
   "private": true,
-  "version": "0.1.0",
+  "version": "1.0.0",
   "type": "module",
   "description": "Local-first desktop library manager for 3D printing models.",
   "homepage": "https://meshkeep.app",

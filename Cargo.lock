@@ -2530,7 +2530,7 @@ dependencies = [
 
 [[package]]
 name = "meshkeep"
-version = "0.1.0"
+version = "1.0.0"
 dependencies = [
  "keyring",
  "log",
@@ -2557,7 +2557,7 @@ dependencies = [
 
 [[package]]
 name = "meshkeep-engine"
-version = "0.1.0"
+version = "1.0.0"
 dependencies = [
  "base64 0.22.1",
  "dunce",
