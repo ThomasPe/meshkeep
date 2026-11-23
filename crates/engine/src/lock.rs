@@ -15,6 +15,10 @@ use std::time::{Duration, Instant};
 /// Waiting or holding longer than this is logged.
 pub const SLOW_LOCK: Duration = Duration::from_secs(1);
 
+/// How often `SharedEngine::scan_root` walks a root without the lock before it gives up on
+/// an index that keeps changing and reads the root under the lock.
+pub const UNLOCKED_WALKS: u32 = 3;
+
 pub struct SharedEngine {
     inner: Mutex<Engine>,
 }
@@ -56,10 +60,23 @@ impl SharedEngine {
     /// disk runs without it, so commands of the window are answered meanwhile (a locked
     /// scan of a large or slow root kept the first screen waiting). `Engine::scan_root_as`
     /// is the same scan in one piece.
-    pub fn scan_root(&self, id: &str, trigger: &str, progress: impl FnMut(ScanProgress)) -> Result<ScanReport> {
-        let job = self.lock().unwrap().scan_job(id, trigger)?;
-        let walk = job.walk(progress);
-        self.lock().unwrap().finish_scan(job, walk)
+    ///
+    /// A walk that the index overtook (an edit, another scan, see `Engine::scan_overtaken`)
+    /// is not applied. The root is then walked again, still without the lock, up to
+    /// [`UNLOCKED_WALKS`] times; only if the index keeps changing does `finish_scan` read it
+    /// under the lock.
+    #[track_caller]
+    pub fn scan_root(&self, id: &str, trigger: &str, mut progress: impl FnMut(ScanProgress)) -> Result<ScanReport> {
+        let mut walks = 1;
+        loop {
+            let job = self.lock().unwrap().scan_job(id, trigger)?;
+            let walk = job.walk(&mut progress);
+            let mut engine = self.lock().unwrap();
+            if walks >= UNLOCKED_WALKS || !engine.scan_overtaken(&job) {
+                return engine.finish_scan(job, walk);
+            }
+            walks += 1;
+        }
     }
 
     /// Like `Mutex::try_lock`: `None` while someone else holds the engine.
@@ -111,6 +128,39 @@ fn short(loc: &Location<'_>) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A walk the index overtook is repeated without the lock; the engine is free meanwhile.
+    #[test]
+    fn a_scan_overtaken_once_walks_again_without_the_lock() {
+        use crate::model::{ListQuery, SyncMode};
+        let data = tempfile::tempdir().unwrap();
+        let lib = tempfile::tempdir().unwrap();
+        for name in ["A", "B"] {
+            std::fs::create_dir_all(lib.path().join(name)).unwrap();
+            std::fs::write(lib.path().join(name).join("m.stl"), b"solid").unwrap();
+        }
+        let shared = SharedEngine::new(Engine::open(data.path()).unwrap());
+        let root = shared.lock().unwrap().add_root(lib.path(), SyncMode::Watch).unwrap();
+        // the first walk is overtaken by an edit made while it runs (from its progress
+        // callback, which proves the lock is free during the walk)
+        let mut edits = 0;
+        let mut walks_seen = 0;
+        let report = shared
+            .scan_root(&root.id, "startup", |p| {
+                if p.projects_found == 1 {
+                    walks_seen += 1;
+                }
+                if edits == 0 {
+                    edits += 1;
+                    let mut engine = shared.try_lock().expect("the walk holds no lock");
+                    engine.set_ignore_patterns(vec!["B".into()]).unwrap();
+                }
+            })
+            .unwrap();
+        assert_eq!(walks_seen, 2, "walked again after the settings changed");
+        assert_eq!(report.projects, 1, "the second walk ignores B");
+        assert_eq!(shared.lock().unwrap().list_projects(&ListQuery::default()).unwrap().len(), 1);
+    }
 
     #[test]
     fn locks_like_a_mutex_and_reports_poison() {

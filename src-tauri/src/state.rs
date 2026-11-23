@@ -207,17 +207,33 @@ pub fn spawn_watch_loop(app: AppHandle, rx: mpsc::Receiver<WatchEvent>) {
         .expect("spawn watch thread");
 }
 
-/// Reads one root again and tells the window: `scan://progress` while it is read,
-/// `library://changed` with `reason` when it is done (with `error` when it could not be
-/// read, e.g. an offline drive). The disk is read without the engine lock
-/// (`SharedEngine::scan_root`), so the window is not kept waiting. `false` when the scan
-/// failed or another background scan is already reading this root.
-fn scan_and_tell(app: &AppHandle, root_id: &str, reason: &'static str) -> bool {
+/// How a background scan of one root ended.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Scan {
+    Done,
+    Failed,
+    /// Another background scan is reading this root; nothing was done.
+    Busy,
+}
+
+/// Reads one root again and tells the window: `scan://progress` while it is read (a first
+/// one with no projects right away, so a root that is empty or slow to reach its first
+/// project shows as being scanned too), `library://changed` with `reason` when it is done
+/// (with `error` when it could not be read, e.g. an offline drive). The disk is read without
+/// the engine lock (`SharedEngine::scan_root`), so the window is not kept waiting.
+fn scan_and_tell(app: &AppHandle, root_id: &str, reason: &'static str) -> Scan {
     let state = app.state::<AppState>();
     if !state.sync.lock().unwrap().running.insert(root_id.to_string()) {
-        return false;
+        return Scan::Busy;
     }
-    let mut last = Instant::now() - Duration::from_secs(1);
+    let _ = app.emit(
+        "scan://progress",
+        meshkeep_engine::ScanProgress {
+            root_id: root_id.to_string(),
+            projects_found: 0,
+        },
+    );
+    let mut last = Instant::now();
     let result = state.engine.scan_root(root_id, reason, |p| {
         if last.elapsed() >= Duration::from_millis(100) {
             last = Instant::now();
@@ -232,7 +248,7 @@ fn scan_and_tell(app: &AppHandle, root_id: &str, reason: &'static str) -> bool {
                 "library://changed",
                 serde_json::json!({ "rootId": root_id, "report": report, "reason": reason }),
             );
-            true
+            Scan::Done
         }
         Err(e) => {
             log::warn!("{reason} scan of {root_id} failed: {e}");
@@ -240,7 +256,7 @@ fn scan_and_tell(app: &AppHandle, root_id: &str, reason: &'static str) -> bool {
                 "library://changed",
                 serde_json::json!({ "rootId": root_id, "report": serde_json::Value::Null, "reason": reason, "error": e.to_string() }),
             );
-            false
+            Scan::Failed
         }
     }
 }
@@ -268,15 +284,46 @@ pub fn spawn_startup_sync(app: &AppHandle) {
     });
 }
 
-/// The index named a folder or file that is gone from an online root (`Engine::stale_root`
-/// for `project_id` and `rel`): the library was changed outside the app and nothing has
-/// reported it yet (a manual root, a polled one between two polls, an event the watcher
-/// missed). Reads that root again; the window then shows what is there and says why
-/// (`reason: "resync"`). If the same thing is still missing afterwards, a scan does not fix
-/// it: it starts no further repair, and the root pauses for [`REPAIR_PAUSE`].
-pub fn repair_root(app: &AppHandle, root_id: &str, project_id: &str, rel: Option<&str>) {
+/// What an access to a project found missing on an online root.
+#[derive(Debug, Clone)]
+pub enum Missing {
+    /// The project's folder.
+    Folder,
+    /// One of its indexed files (for a packed project: its archive).
+    File(String),
+    /// An indexed entry of its packed archive; the archive itself is there.
+    Entry(String),
+}
+
+impl Missing {
+    fn rel(&self) -> Option<&str> {
+        match self {
+            Missing::Folder => None,
+            Missing::File(rel) | Missing::Entry(rel) => Some(rel),
+        }
+    }
+
+    /// Whether the index names it right now although it cannot be read. An archive entry is
+    /// judged by the index alone: a scan lists a changed archive again, so an entry that is
+    /// still listed after one is not something a scan fixes.
+    fn still_listed(&self, engine: &meshkeep_engine::Engine, project_id: &str) -> bool {
+        match self {
+            Missing::Folder => engine.stale_root(project_id, None).is_some(),
+            Missing::File(rel) => engine.stale_root(project_id, Some(rel)).is_some(),
+            Missing::Entry(rel) => engine.has_file(project_id, rel),
+        }
+    }
+}
+
+/// The index named a folder, file or archive entry that is gone from an online root: the
+/// library was changed outside the app and nothing has reported it yet (a manual root, a
+/// polled one between two polls, an event the watcher missed). Reads that root again; the
+/// window then shows what is there and says why (`reason: "resync"`). If the same thing is
+/// still listed and missing afterwards, a scan does not fix it: it starts no further repair,
+/// and the root pauses for [`REPAIR_PAUSE`], as it does after a scan that failed.
+pub fn repair_root(app: &AppHandle, root_id: &str, project_id: &str, missing: Missing) {
     let state = app.state::<AppState>();
-    let cause = format!("{project_id}\n{}", rel.unwrap_or_default());
+    let cause = format!("{project_id}\n{}", missing.rel().unwrap_or_default());
     {
         let sync = state.sync.lock().unwrap();
         let paused = sync.paused.get(root_id).is_some_and(|t| t.elapsed() < REPAIR_PAUSE);
@@ -284,23 +331,30 @@ pub fn repair_root(app: &AppHandle, root_id: &str, project_id: &str, rel: Option
             return;
         }
     }
-    log::info!(
-        "root {root_id}: {project_id} {} is gone from disk, reading the root again",
-        rel.unwrap_or("(the folder)")
-    );
-    let (app, root_id, project_id, rel) = (app.clone(), root_id.to_string(), project_id.to_string(), rel.map(str::to_string));
+    let (app, root_id, project_id) = (app.clone(), root_id.to_string(), project_id.to_string());
     spawn_sync("meshkeep-repair", move || {
         let state = app.state::<AppState>();
-        let scanned = scan_and_tell(&app, &root_id, "resync");
-        let still_missing = scanned && state.engine.lock().unwrap().stale_root(&project_id, rel.as_deref()).is_some();
-        if scanned && !still_missing {
+        // The caller saw it missing before it got here. A repair that ended in between has
+        // dealt with it already: no second scan, no second notice.
+        if !missing.still_listed(&state.engine.lock().unwrap(), &project_id) {
             return;
         }
+        log::info!(
+            "root {root_id}: {project_id} {} is gone from disk, reading the root again",
+            missing.rel().unwrap_or("(the folder)")
+        );
+        let still_missing = match scan_and_tell(&app, &root_id, "resync") {
+            // the scan that is reading the root may be the repair; this one did nothing
+            Scan::Busy => return,
+            Scan::Failed => false,
+            Scan::Done => {
+                if !missing.still_listed(&state.engine.lock().unwrap(), &project_id) {
+                    return;
+                }
+                true
+            }
+        };
         let mut sync = state.sync.lock().unwrap();
-        // a root another scan was reading is not paused: that scan may be the repair
-        if sync.running.contains(&root_id) {
-            return;
-        }
         sync.paused.insert(root_id.clone(), Instant::now());
         if still_missing {
             log::warn!("root {root_id}: {project_id} is still listed with something that cannot be read; not scanning for it again");

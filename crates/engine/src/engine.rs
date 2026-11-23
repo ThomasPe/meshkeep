@@ -1111,11 +1111,35 @@ impl Engine {
     /// import, another scan), the walk may be older than what the index holds; the root is
     /// then read once more under the lock instead of overwriting newer rows.
     pub fn finish_scan(&mut self, job: ScanJob, walk: ScanWalk) -> Result<ScanReport> {
-        if job.revision != self.index.revision() || job.opts != self.scan_opts {
+        if self.scan_overtaken(&job) {
             tracing::debug!("scan of {}: the index changed during the walk, reading again", job.root.id);
             return self.scan_root_as(&job.root.id, &job.trigger, |_| {});
         }
         self.apply_scan(job, walk)
+    }
+
+    /// Whether the walk of `job` may be older than what the engine holds now: project rows
+    /// or the scan settings were written since, or the root was found offline meanwhile (a
+    /// walk across a drive that dropped out is a part of the root, not the root).
+    pub fn scan_overtaken(&self, job: &ScanJob) -> bool {
+        let went_offline =
+            job.root.status != RootStatus::Offline && self.roots.get(&job.root.id).is_some_and(|r| r.status == RootStatus::Offline);
+        job.revision != self.index.revision() || job.opts != self.scan_opts || went_offline
+    }
+
+    /// Marks a root offline and keeps its projects (LIB-5).
+    fn keep_offline(&mut self, id: &str, path: PathBuf, message: String) -> EngineError {
+        let marked = self
+            .roots
+            .update(id, |r| {
+                r.status = RootStatus::Offline;
+                r.last_error = Some(message);
+            })
+            .and_then(|_| self.index.mark_root_offline(id, true));
+        match marked {
+            Ok(()) => EngineError::RootOffline(path),
+            Err(e) => e,
+        }
     }
 
     fn apply_scan(&mut self, job: ScanJob, walk: ScanWalk) -> Result<ScanReport> {
@@ -1125,18 +1149,32 @@ impl Engine {
         let mut outcome = match walk.0 {
             Ok(o) => o,
             Err(EngineError::RootOffline(p)) => {
-                self.roots.update(id, |r| {
-                    r.status = RootStatus::Offline;
-                    r.last_error = Some(format!("folder not reachable: {}", p.display()));
-                })?;
-                self.index.mark_root_offline(id, true)?;
-                return Err(EngineError::RootOffline(p));
+                let message = format!("folder not reachable: {}", p.display());
+                return Err(self.keep_offline(id, p, message));
             }
             Err(e) => {
                 self.roots.update(id, |r| r.last_error = Some(e.to_string()))?;
                 return Err(e);
             }
         };
+        // The root went away while it was read (a drive unplugged, a share dropped): what the
+        // walk still found is a part of it, and replacing the rows with that would delete
+        // the rest (LIB-5).
+        if !root.path.is_dir() {
+            let message = format!("folder not reachable: {}", root.path.display());
+            return Err(self.keep_offline(id, root.path.clone(), message));
+        }
+        // A share that is not mounted leaves its mount point behind: a folder that exists and
+        // is empty. A scan the app started by itself does not take that for "every project was
+        // deleted"; the projects stay until the user rescans, which says so.
+        let automatic = matches!(job.trigger.as_str(), "startup" | "resync");
+        if automatic && outcome.projects.is_empty() && self.index.count(Some(id))?.0 > 0 && dir_is_empty(&root.path) {
+            let message = format!(
+                "folder is empty: {} (a share that is not connected?); rescan it if the projects are gone",
+                root.path.display()
+            );
+            return Err(self.keep_offline(id, root.path.clone(), message));
+        }
         for p in &mut outcome.projects {
             p.favorite = self.collections.is_favorite(&p.id);
         }
@@ -1216,6 +1254,20 @@ impl Engine {
             }
         };
         gone.then(|| root.id.clone())
+    }
+
+    /// The root of an indexed project, if that root is reachable. For an access that failed
+    /// on something `stale_root` cannot see without opening files: an entry that is gone
+    /// from a packed project's archive.
+    pub fn online_root_of(&self, project_id: &str) -> Option<String> {
+        let p = self.index.project(project_id).ok()??;
+        let root = self.roots.get(&p.root_id)?;
+        (!p.offline && root.path.is_dir()).then(|| root.id.clone())
+    }
+
+    /// Whether the index lists `rel` as a file of the project.
+    pub fn has_file(&self, project_id: &str, rel: &str) -> bool {
+        matches!(self.index.project(project_id), Ok(Some(p)) if p.files.iter().any(|f| f.rel_path == rel))
     }
 
     /// Reacts to watcher events. Coarse but correct for now: any change under a root
@@ -3101,6 +3153,11 @@ fn located_at(packed: Option<&str>, dir: &Path, rel: &str) -> Located {
         }
     }
     Located::Disk(dir.join(rel))
+}
+
+/// True for a folder without a single entry (and for one that cannot be listed).
+fn dir_is_empty(dir: &Path) -> bool {
+    std::fs::read_dir(dir).map(|mut entries| entries.next().is_none()).unwrap_or(true)
 }
 
 fn located_in(p: &Project, dir: &Path, rel: &str) -> Located {

@@ -375,7 +375,7 @@ pub fn get_project(app: AppHandle, state: State<AppState>, id: String) -> CmdRes
         (engine.get_project(&id)?, engine.stale_root(&id, None))
     };
     if let Some(root_id) = stale {
-        state::repair_root(&app, &root_id, &id, None);
+        state::repair_root(&app, &root_id, &id, state::Missing::Folder);
     }
     Ok(project)
 }
@@ -430,17 +430,41 @@ pub async fn read_project_file(app: AppHandle, project_id: String, rel_path: Str
         Err((e, stale)) => {
             // an indexed file that is gone: the library changed outside the app
             if let Some(root_id) = stale {
-                state::repair_root(&app, &root_id, &project_id, Some(&rel_path));
+                state::repair_root(&app, &root_id, &project_id, state::Missing::File(rel_path));
             }
             return Err(e.into());
         }
     };
-    let bytes = tauri::async_runtime::spawn_blocking(move || located.read())
+    let packed = matches!(located, meshkeep_engine::packed::Located::Packed { .. });
+    let read = tauri::async_runtime::spawn_blocking(move || located.read())
         .await
         .map_err(|e| AppError {
             code: "shell",
             message: e.to_string(),
-        })??;
+        })?;
+    let bytes = match read {
+        Ok(bytes) => bytes,
+        Err(e) => {
+            // Gone between the look-up and the read, or an entry that is no longer in a
+            // packed project's archive (the archive is there, so the look-up succeeded).
+            if matches!(&e, EngineError::Io { source, .. } if source.kind() == std::io::ErrorKind::NotFound) {
+                let state = app.state::<AppState>();
+                let (root, missing) = {
+                    let engine = state.engine.lock().unwrap();
+                    if packed {
+                        (engine.online_root_of(&project_id), state::Missing::Entry(rel_path))
+                    } else {
+                        let root = engine.stale_root(&project_id, Some(&rel_path));
+                        (root, state::Missing::File(rel_path))
+                    }
+                };
+                if let Some(root_id) = root {
+                    state::repair_root(&app, &root_id, &project_id, missing);
+                }
+            }
+            return Err(e.into());
+        }
+    };
     Ok(Response::new(bytes))
 }
 

@@ -1873,3 +1873,102 @@ fn a_scan_whose_walk_the_index_overtook_reads_the_root_again() {
     assert!(matches!(engine.finish_scan(job, walk), Err(EngineError::RootNotFound(_))));
     assert!(engine.list_projects(&ListQuery::default()).unwrap().is_empty());
 }
+
+/// LIB-5 for the scans the app starts by itself: a root that drops out while it is read, or
+/// a share that is not mounted and leaves an empty mount point, keeps its projects.
+#[test]
+fn a_root_that_is_gone_or_empty_keeps_its_projects() {
+    use meshkeep_engine::model::RootStatus;
+    use meshkeep_engine::SharedEngine;
+
+    let data = tempfile::tempdir().unwrap();
+    let lib = tempfile::tempdir().unwrap();
+    touch(&lib.path().join("A/a.stl"), 100);
+    touch(&lib.path().join("B/b.stl"), 100);
+    let mut engine = Engine::open(data.path()).unwrap();
+    let root = engine.add_root(lib.path(), SyncMode::Watch).unwrap();
+    engine.scan_root(&root.id, |_| {}).unwrap();
+    let listed = |engine: &Engine| engine.list_projects(&ListQuery::default()).unwrap();
+    let status = |engine: &mut Engine| engine.roots().unwrap()[0].clone();
+
+    // the drive drops out after the walk has read a part of it
+    let job = engine.scan_job(&root.id, "startup").unwrap();
+    fs::remove_dir_all(lib.path().join("B")).unwrap();
+    let walk = job.walk(|_| {});
+    fs::remove_dir_all(lib.path()).unwrap();
+    assert!(matches!(engine.finish_scan(job, walk), Err(EngineError::RootOffline(_))));
+    assert_eq!(listed(&engine).len(), 2, "the partial walk (A only) did not replace the rows");
+    assert!(listed(&engine).iter().all(|p| p.offline));
+
+    // it was seen offline during the walk and is back, empty, when the walk ends: the walk
+    // is not trusted, and an empty folder where projects are known is not "all deleted"
+    fs::create_dir_all(lib.path()).unwrap();
+    touch(&lib.path().join("A/a.stl"), 100);
+    assert_eq!(status(&mut engine).status, RootStatus::Online);
+    let job = engine.scan_job(&root.id, "startup").unwrap();
+    let walk = job.walk(|_| {});
+    fs::remove_dir_all(lib.path()).unwrap();
+    assert_eq!(status(&mut engine).status, RootStatus::Offline);
+    fs::create_dir_all(lib.path()).unwrap();
+    assert!(engine.scan_overtaken(&job));
+    assert!(matches!(engine.finish_scan(job, walk), Err(EngineError::RootOffline(_))));
+    assert_eq!(listed(&engine).len(), 2);
+
+    // a mount point without its share: the folder exists and is empty
+    let shared = SharedEngine::new(engine);
+    for trigger in ["startup", "resync"] {
+        assert!(
+            matches!(shared.scan_root(&root.id, trigger, |_| {}), Err(EngineError::RootOffline(_))),
+            "{trigger}"
+        );
+    }
+    let mut engine = shared.lock().unwrap();
+    assert_eq!(listed(&engine).len(), 2, "kept");
+    assert!(listed(&engine).iter().all(|p| p.offline));
+    let problem = status(&mut engine).last_error.unwrap_or_default();
+    assert!(problem.contains("folder is empty"), "{problem}");
+
+    // the user's own rescan is the confirmation that the projects are gone
+    assert_eq!(engine.scan_root(&root.id, |_| {}).unwrap().projects, 0);
+    assert!(listed(&engine).is_empty());
+}
+
+/// An entry that was taken out of a packed project's archive: the archive is there, so only
+/// the read finds out. The root is reachable, and a scan lists the archive again.
+#[test]
+fn an_entry_gone_from_a_packed_archive_is_dropped_by_the_next_scan() {
+    let data = tempfile::tempdir().unwrap();
+    let lib = tempfile::tempdir().unwrap();
+    fs::create_dir_all(lib.path().join("Clip")).unwrap();
+    fs::write(lib.path().join("Clip/project.yaml"), "packed: Clip.zip\n").unwrap();
+    let zip = lib.path().join("Clip/Clip.zip");
+    write_zip(&zip, &[("a.stl", b"solid a"), ("b.stl", b"solid b, a bit longer")]);
+    let mut engine = Engine::open(data.path()).unwrap();
+    let root = engine.add_root(lib.path(), SyncMode::Manual).unwrap();
+    engine.scan_root(&root.id, |_| {}).unwrap();
+    let id = engine.list_projects(&ListQuery::default()).unwrap()[0].id.clone();
+    assert!(
+        engine.has_file(&id, "Clip.zip/b.stl"),
+        "{:?}",
+        engine.get_project(&id).unwrap().files
+    );
+    assert_eq!(
+        engine.locate(&id, "Clip.zip/b.stl").unwrap().read().unwrap(),
+        b"solid b, a bit longer"
+    );
+
+    write_zip(&zip, &[("a.stl", b"solid a")]);
+    let read = engine.locate(&id, "Clip.zip/b.stl").unwrap().read();
+    assert!(
+        matches!(&read, Err(EngineError::Io { source, .. }) if source.kind() == std::io::ErrorKind::NotFound),
+        "{read:?}"
+    );
+    assert_eq!(engine.stale_root(&id, Some("Clip.zip/b.stl")), None, "the archive itself is there");
+    assert_eq!(engine.online_root_of(&id), Some(root.id.clone()));
+    assert!(engine.has_file(&id, "Clip.zip/b.stl"), "still listed until the root is read again");
+
+    engine.scan_root_as(&root.id, "resync", |_| {}).unwrap();
+    assert!(!engine.has_file(&id, "Clip.zip/b.stl"));
+    assert!(engine.has_file(&id, "Clip.zip/a.stl"));
+    assert_eq!(engine.online_root_of("no-such-project"), None);
+}

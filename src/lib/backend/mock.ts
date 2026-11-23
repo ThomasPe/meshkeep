@@ -249,7 +249,8 @@ export function createMockBackend(): Backend {
           const left = projects.filter((x) => x.root_id === p.root_id && x.id !== id);
           listeners.scan.forEach((cb) => cb({ root_id: p.root_id, projects_found: left.length }));
           await delay(120);
-          projects.splice(projects.findIndex((x) => x.id === id), 1);
+          const at = projects.findIndex((x) => x.id === id);
+          if (at >= 0) projects.splice(at, 1);
           const report = { root_id: p.root_id, projects: left.length, files: left.reduce((a, x) => a + x.files.length, 0), ignored: 12, warnings: [], millis: 200 };
           listeners.lib.forEach((cb) => cb({ rootId: p.root_id, report, reason: 'resync' }));
         })();

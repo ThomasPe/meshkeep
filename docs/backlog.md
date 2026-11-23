@@ -96,7 +96,8 @@ submission is outside the code: Partner Center identity values, screenshots
       (`state::spawn_startup_sync`); a project folder or file that is gone from an online
       root triggers a rescan of that root and a toast (`Engine::stale_root`,
       `state::repair_root`; a repair that did not help pauses the root for 30 s). These scans read the disk without the engine lock
-      (`SharedEngine::scan_root`) and read again if the index was written meanwhile.
+      (`SharedEngine::scan_root`) and read again if the index was written meanwhile. A root
+      that drops out during a scan, or comes up as an empty folder, keeps its projects (LIB-5).
 - [x] **Offline handling** (LIB-5).
 - [x] **Sync status & background activity** (LIB-6, LIB-7, APP-7): per-root last scan
       summary (counts, duration, trigger, scanner notes) and last sync problem in settings;
