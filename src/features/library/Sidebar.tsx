@@ -225,6 +225,10 @@ function RootTree({ root, filter, setFilter, onRescan, current }: { root: Librar
   const inbox = useInbox(root.status === 'offline' ? null : root.id);
   const rootFilter: LibraryFilter = { kind: 'root', rootId: root.id };
   const inboxFilter: LibraryFilter = { kind: 'inbox', rootId: root.id };
+  // the tree has one selection: while a project is open it is that project's row, and the
+  // root, inbox or folder the library still remembers gives its highlight up (#170)
+  const rootActive = !current && same(filter, rootFilter);
+  const inboxActive = !current && same(filter, inboxFilter);
   const name = root.path.split(/[\\/]/).filter(Boolean).pop() || root.path;
   const online = root.status !== 'offline';
   const modeKey = online ? root.mode : 'offline';
@@ -234,7 +238,7 @@ function RootTree({ root, filter, setFilter, onRescan, current }: { root: Librar
     <div>
       <ContextMenu>
         <ContextMenuTrigger asChild>
-          <div className={cn(itemClass, 'pr-2 font-extrabold text-foreground focus-visible:outline-2 focus-visible:outline-primary', same(filter, rootFilter) ? activeClass : 'bg-secondary/50', drop.over && 'outline outline-2 outline-primary')} {...drop.props} data-drop-over={drop.over || undefined} data-testid="root-row" data-tree-row data-key={root.id} data-label={name} role="treeitem" aria-expanded={open} aria-selected={same(filter, rootFilter)} tabIndex={-1}>
+          <div className={cn(itemClass, 'pr-2 font-extrabold text-foreground focus-visible:outline-2 focus-visible:outline-primary', rootActive ? activeClass : 'bg-secondary/50', drop.over && 'outline outline-2 outline-primary')} {...drop.props} data-drop-over={drop.over || undefined} data-testid="root-row" data-tree-row data-key={root.id} data-label={name} role="treeitem" aria-expanded={open} aria-selected={rootActive} tabIndex={-1}>
             <button type="button" tabIndex={-1} data-chevron aria-label={open ? 'collapse' : 'expand'} className="-ml-1 rounded p-0.5 text-muted-foreground hover:text-foreground" onClick={() => setOpen((o) => !o)}>{open ? <ChevronDown className="size-3.5" /> : <ChevronRight className="size-3.5" />}</button>
             <button type="button" tabIndex={-1} data-select data-testid="filter-root" className="flex min-w-0 flex-1 items-center gap-2 text-left" onClick={() => setFilter(rootFilter)} title={`${root.path} · ${modeLabel}`}>
               <span className="relative shrink-0"><HardDrive className="text-muted-foreground" /><span className={cn('absolute -bottom-0.5 -right-0.5 size-2 rounded-full ring-2 ring-panel', MODE_DOT[modeKey])} data-testid="root-mode-dot" data-mode={modeKey} aria-label={modeLabel} /></span>
@@ -252,7 +256,7 @@ function RootTree({ root, filter, setFilter, onRescan, current }: { root: Librar
       {open && online && (
         <ContextMenu>
           <ContextMenuTrigger asChild>
-            <div className={cn(itemClass, 'h-8 font-medium focus-visible:outline-2 focus-visible:outline-primary', same(filter, inboxFilter) && activeClass)} style={{ paddingLeft: 12 + INDENT }} data-tree-row data-key={`${root.id}:_Inbox`} data-parent={root.id} data-label={t('inbox.title')} role="treeitem" aria-selected={same(filter, inboxFilter)} tabIndex={-1}>
+            <div className={cn(itemClass, 'h-8 font-medium focus-visible:outline-2 focus-visible:outline-primary', inboxActive && activeClass)} style={{ paddingLeft: 12 + INDENT }} data-tree-row data-key={`${root.id}:_Inbox`} data-parent={root.id} data-label={t('inbox.title')} role="treeitem" aria-selected={inboxActive} tabIndex={-1}>
               <span className="w-3.5 shrink-0" />
               <button type="button" tabIndex={-1} data-select data-testid="filter-inbox" className="flex min-w-0 flex-1 items-center gap-2 text-left" onClick={() => setFilter(inboxFilter)}><Inbox className="text-muted-foreground" /><Truncated text={t('inbox.title')} /></button>
               <span className="shrink-0 text-[11px] tabular text-muted-foreground" data-testid="inbox-count">{inbox.data?.length ?? 0}</span>
@@ -280,7 +284,7 @@ function FolderItem({ node, depth, rootId, filter, setFilter, online, current }:
   // its own count is implied, so only containers show one
   const Icon = node.is_project ? Box : Folder;
   const projectId = node.is_project ? key : null;
-  const active = projectId ? current === projectId : same(filter, f);
+  const active = projectId ? current === projectId : !current && same(filter, f);
   const choose = () => (projectId ? navigate({ page: 'project', id: projectId }) : setFilter(f));
   const drop = useDropTarget(online && !projectId, rootId, node.rel_path, node.name);
   // a project row can be dragged onto another folder row, same payload as a card

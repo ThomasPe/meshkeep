@@ -1445,6 +1445,47 @@ test('folder tree: rows are ordered alphabetically regardless of case (#74)', as
   expect(await rows.evaluateAll((els) => els.map((el) => el.getAttribute('data-label')))).toEqual(['bracket 10', 'Cable Clips']);
 });
 
+test('folder tree: folders come first on a level, the projects below them (#170)', async ({ page }) => {
+  // "Cable Clips" would lead the level by name; as a project it belongs below the folders
+  await page.getByTestId('project-card').filter({ hasText: 'Cable Clips' }).click({ button: 'right' });
+  await page.getByTestId('menu-move').click();
+  await page.getByTestId('move-dialog').getByTestId('move-folder').filter({ hasText: 'Projects' }).first().click();
+  await page.getByTestId('move-confirm').click();
+  await expect(page.getByTestId('move-dialog')).toBeHidden();
+  const rows = page.locator('[data-tree-row][data-parent="r1:Projects"]');
+  await expect(rows.last()).toHaveAttribute('data-label', 'Cable Clips');
+  const kinds = await rows.evaluateAll((els) => els.map((el) => el.getAttribute('data-kind')));
+  expect(kinds.at(-1)).toBe('project');
+  expect(kinds.slice(0, -1).every((k) => k === 'folder')).toBe(true);
+  const folders = await rows.evaluateAll((els) => els.slice(0, -1).map((el) => el.getAttribute('data-label')));
+  expect(folders).toEqual([...folders].sort((x, y) => x!.localeCompare(y!, 'en', { numeric: true })));
+});
+
+test('folder tree: opening a project takes the highlight from the folder picked before (#170)', async ({ page }) => {
+  const desk = page.locator('[data-tree-row][data-label="Desk"]');
+  await desk.getByTestId('filter-folder').click();
+  await expect(desk).toHaveAttribute('aria-selected', 'true');
+  await desk.getByRole('button', { name: 'expand' }).click();
+  const stand = page.locator('[data-tree-row][data-label="Phone Stand"]');
+  await stand.getByTestId('tree-project').click();
+  await expect(page.getByTestId('project-page')).toBeVisible();
+  // one selection in the tree: the project, not the project and its folder
+  await expect(stand).toHaveAttribute('aria-selected', 'true');
+  await expect(desk).toHaveAttribute('aria-selected', 'false');
+  await expect(page.locator('[data-tree-row][aria-selected="true"]')).toHaveCount(1);
+  const background = (row: typeof desk) => row.evaluate((el) => getComputedStyle(el).backgroundColor);
+  expect(await background(desk)).not.toBe(await background(stand));
+  // the library still remembers the folder: going back shows it selected again
+  await page.goBack();
+  await expect(page.getByTestId('library')).toBeVisible();
+  await expect(desk).toHaveAttribute('aria-selected', 'true');
+  await expect(stand).toHaveAttribute('aria-selected', 'false');
+  // the same for a root and its inbox
+  await page.getByTestId('filter-root').first().click();
+  await stand.getByTestId('tree-project').click();
+  await expect(page.getByTestId('root-row').first()).toHaveAttribute('aria-selected', 'false');
+});
+
 test('folder tree: a project row opens the project, expansion is remembered', async ({ page }) => {
   const desk = page.locator('[data-tree-row][data-label="Desk"]');
   await desk.getByRole('button', { name: 'expand' }).click();
