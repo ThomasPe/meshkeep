@@ -333,7 +333,8 @@
       "poll": "Poll",
       "import": "Import",
       "startup": "Start",
-      "resync": "fehlender Ordner"
+      "resync": "fehlender Ordner",
+      "catchup": "Abgleich"
     },
     "thumbLocation": "Vorschauen speichern in",
     "thumbLocationApp": "App-Daten",

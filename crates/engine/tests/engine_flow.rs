@@ -1754,6 +1754,7 @@ fn changes_made_while_the_app_was_closed_are_caught_up() {
             std::slice::from_ref(&root.id),
             "only the watched root; polled ones come due, manual ones wait"
         );
+        assert_eq!(engine.watched_roots(), [(root.id.clone(), root.path.clone())]);
         // the index still has the old picture, and says which root to read again
         assert_eq!(engine.get_project(&foo_id).unwrap().title, "Foo");
         assert_eq!(engine.stale_root(&foo_id, None), Some(root.id.clone()), "the folder is gone");
@@ -1916,7 +1917,7 @@ fn a_root_that_is_gone_or_empty_keeps_its_projects() {
 
     // a mount point without its share: the folder exists and is empty
     let shared = SharedEngine::new(engine);
-    for trigger in ["startup", "resync"] {
+    for trigger in ["startup", "resync", "catchup"] {
         assert!(
             matches!(shared.scan_root(&root.id, trigger, |_| {}), Err(EngineError::RootOffline(_))),
             "{trigger}"

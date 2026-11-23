@@ -310,9 +310,8 @@ pub fn add_root(app: AppHandle, state: State<AppState>, path: String, mode: Opti
 }
 
 #[tauri::command(async)]
-pub fn remove_root(app: AppHandle, state: State<AppState>, id: String) -> CmdResult<LibraryRoot> {
-    state::stop_watcher_for(&app, &id);
-    let root = { state.engine.lock().unwrap().remove_root(&id)? };
+pub fn remove_root(app: AppHandle, id: String) -> CmdResult<LibraryRoot> {
+    let root = state::change_root(&app, &id, |engine| engine.remove_root(&id))?;
     let _ = app.emit("library://changed", serde_json::json!({ "rootId": id, "reason": "root_removed" }));
     Ok(root)
 }
@@ -325,10 +324,14 @@ pub fn set_root_mode(
     mode: SyncMode,
     poll_interval_secs: Option<u64>,
 ) -> CmdResult<LibraryRoot> {
-    let root = { state.engine.lock().unwrap().set_root_mode(&id, mode, poll_interval_secs)? };
-    state::stop_watcher_for(&app, &id);
+    let before = { state.engine.lock().unwrap().root(&id)?.mode };
+    let root = state::change_root(&app, &id, |engine| engine.set_root_mode(&id, mode, poll_interval_secs))?;
     if mode == SyncMode::Watch {
-        state::start_watcher_for(&app, &id);
+        let start = state::start_watcher_for(&app, &id);
+        // the new watcher knows nothing of what changed while the root was manual or polled
+        if before != SyncMode::Watch && matches!(start, state::WatchStart::Started | state::WatchStart::Failed) {
+            state::catch_up(&app, &id);
+        }
     }
     Ok(root)
 }

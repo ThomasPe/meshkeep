@@ -1,5 +1,5 @@
 use meshkeep_engine::model::SyncMode;
-use meshkeep_engine::watch::{RootWatcher, WatchEvent};
+use meshkeep_engine::watch::{RootWatcher, Seen, WatchEvent};
 use meshkeep_engine::SharedEngine;
 use std::collections::{HashMap, HashSet};
 use std::path::PathBuf;
@@ -56,6 +56,8 @@ pub struct AppState {
     pub watch_tx: mpsc::Sender<WatchEvent>,
     /// Scans the shell started on its own (catch-up at start, repair after a missing folder).
     pub sync: Mutex<BackgroundSync>,
+    /// Watched roots whose folder is not reachable; see `follow_watched_roots`.
+    pub presence: Mutex<meshkeep_engine::watch::WatchPresence>,
     pub ai_keys: crate::keys::AiKeyStore,
     pub config: RuntimeConfig,
     pub data_dir: PathBuf,
@@ -67,6 +69,10 @@ pub struct AppState {
 #[derive(Default)]
 pub struct BackgroundSync {
     running: HashSet<String>,
+    /// A scan to run right after the one that is reading the root (see `scan_and_tell`).
+    queued: HashMap<String, &'static str>,
+    /// Watched roots whose folder is being asked for right now (`follow_watched_roots`).
+    probing: HashSet<String>,
     /// Missing folders and files (`project id` + file) that were still missing after the
     /// root was read again. A scan does not fix these, so they start no further one.
     unfixable: HashSet<String>,
@@ -162,21 +168,74 @@ pub fn start_watchers(app: &AppHandle) {
     }
 }
 
-pub fn start_watcher_for(app: &AppHandle, root_id: &str) {
+/// How `start_watcher_for` ended.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum WatchStart {
+    Started,
+    /// The folder is there and cannot be watched (network shares often); the user was told.
+    Failed,
+    /// The root is gone or not in watch mode (any more): nothing was started.
+    NotWatched,
+    /// The folder is not reachable; `follow_watched_roots` starts the watcher when it is back.
+    Unreachable,
+}
+
+/// Starts the watcher of one root, if the root is (still) in watch mode. A root whose
+/// folder is not reachable (a drive that is not plugged in) is not a root that cannot be
+/// watched: it gets no "switch to Poll" notice.
+///
+/// The mode is read again under the `watchers` lock, and `change_root` changes a mode or
+/// removes a root under the same lock. So a start that was decided on an older picture (the
+/// 30 s look at the folders) cannot put a watcher back on a root that was switched to manual
+/// or removed in between. Lock order everywhere: `watchers`, then the engine.
+pub fn start_watcher_for(app: &AppHandle, root_id: &str) -> WatchStart {
     let state = app.state::<AppState>();
+    let watched = |state: &AppState| {
+        let root = state.engine.lock().unwrap().root(root_id).ok();
+        root.filter(|r| r.mode == SyncMode::Watch)
+    };
+    let Some(root) = watched(&state) else {
+        return WatchStart::NotWatched;
+    };
+    // outside the locks: asking for a share that hangs can take long
+    if !root.path.is_dir() {
+        log::info!("root {root_id} is not reachable; its watcher starts when it is back");
+        state.presence.lock().unwrap().mark_lost(root_id);
+        return WatchStart::Unreachable;
+    }
+    let mut watchers = state.watchers.lock().unwrap();
+    if watched(&state).is_none() {
+        return WatchStart::NotWatched;
+    }
     let result = { state.engine.lock().unwrap().start_watch(root_id, state.watch_tx.clone()) };
     match result {
         Ok(w) => {
-            state.watchers.lock().unwrap().insert(root_id.to_string(), w);
+            watchers.insert(root_id.to_string(), w);
             log::info!("watching root {root_id}");
+            WatchStart::Started
         }
         Err(e) => {
             log::warn!("cannot watch root {root_id}: {e}");
             let msg = format!("cannot watch for changes ({e}); switch this folder to Poll");
             let _ = state.engine.lock().unwrap().set_root_error(root_id, &msg);
             let _ = app.emit("watch://error", serde_json::json!({ "rootId": root_id, "message": msg }));
+            WatchStart::Failed
         }
     }
+}
+
+/// Changes a root in the engine (its mode, or removes it) and stops its watcher, as one
+/// step with respect to `start_watcher_for`. If the change fails, the watcher stays.
+pub fn change_root<T>(
+    app: &AppHandle,
+    root_id: &str,
+    change: impl FnOnce(&mut meshkeep_engine::Engine) -> meshkeep_engine::Result<T>,
+) -> meshkeep_engine::Result<T> {
+    let state = app.state::<AppState>();
+    let mut watchers = state.watchers.lock().unwrap();
+    let out = change(&mut state.engine.lock().unwrap())?;
+    watchers.remove(root_id);
+    Ok(out)
 }
 
 pub fn stop_watcher_for(app: &AppHandle, root_id: &str) {
@@ -216,16 +275,48 @@ enum Scan {
     Busy,
 }
 
-/// Reads one root again and tells the window: `scan://progress` while it is read (a first
-/// one with no projects right away, so a root that is empty or slow to reach its first
-/// project shows as being scanned too), `library://changed` with `reason` when it is done
-/// (with `error` when it could not be read, e.g. an offline drive). The disk is read without
-/// the engine lock (`SharedEngine::scan_root`), so the window is not kept waiting.
-fn scan_and_tell(app: &AppHandle, root_id: &str, reason: &'static str) -> Scan {
+/// Reads one root again and tells the window (`scan_once`). If another background scan is
+/// reading the root, nothing is done and the answer is `Busy`; with `queue`, the scan is
+/// then run by that other one right after its own. A catch-up needs that: the scan that is
+/// running may have passed a folder before it changed, and the watcher that just started
+/// only sees what changes from now on.
+fn scan_and_tell(app: &AppHandle, root_id: &str, reason: &'static str, queue: bool) -> Scan {
     let state = app.state::<AppState>();
-    if !state.sync.lock().unwrap().running.insert(root_id.to_string()) {
-        return Scan::Busy;
+    {
+        let mut sync = state.sync.lock().unwrap();
+        if !sync.running.insert(root_id.to_string()) {
+            if queue {
+                sync.queued.insert(root_id.to_string(), reason);
+            }
+            return Scan::Busy;
+        }
     }
+    let outcome = scan_once(app, root_id, reason);
+    loop {
+        // one lock for "anything queued?" and "no longer running": a scan queued after the
+        // look would otherwise wait for nobody
+        let next = {
+            let mut sync = state.sync.lock().unwrap();
+            let next = sync.queued.remove(root_id);
+            if next.is_none() {
+                sync.running.remove(root_id);
+            }
+            next
+        };
+        match next {
+            Some(reason) => scan_once(app, root_id, reason),
+            None => return outcome,
+        };
+    }
+}
+
+/// One scan of one root: `scan://progress` while it is read (a first one with no projects
+/// right away, so a root that is empty or slow to reach its first project shows as being
+/// scanned too), `library://changed` with `reason` when it is done (with `error` when it
+/// could not be read, e.g. an offline drive). The disk is read without the engine lock
+/// (`SharedEngine::scan_root`), so the window is not kept waiting.
+fn scan_once(app: &AppHandle, root_id: &str, reason: &'static str) -> Scan {
+    let state = app.state::<AppState>();
     let _ = app.emit(
         "scan://progress",
         meshkeep_engine::ScanProgress {
@@ -240,7 +331,6 @@ fn scan_and_tell(app: &AppHandle, root_id: &str, reason: &'static str) -> Scan {
             let _ = app.emit("scan://progress", &p);
         }
     });
-    state.sync.lock().unwrap().running.remove(root_id);
     match result {
         Ok(report) => {
             log::info!("{reason} scan of {root_id}: {} projects in {} ms", report.projects, report.millis);
@@ -261,12 +351,16 @@ fn scan_and_tell(app: &AppHandle, root_id: &str, reason: &'static str) -> Scan {
     }
 }
 
-fn spawn_sync(name: &str, work: impl FnOnce() + Send + 'static) {
-    if let Err(e) = std::thread::Builder::new().name(name.into()).spawn(work) {
-        log::error!("cannot start the {name} thread: {e}");
+/// `false` when the thread could not be started (the work was not done).
+fn spawn_sync(name: &str, work: impl FnOnce() + Send + 'static) -> bool {
+    match std::thread::Builder::new().name(name.into()).spawn(work) {
+        Ok(_) => true,
+        Err(e) => {
+            log::error!("cannot start the {name} thread: {e}");
+            false
+        }
     }
 }
-
 /// LIB-3: a watcher only sees what happens while the app runs. What was moved, renamed or
 /// deleted while it was closed is caught up here, once, for every watched root, one root
 /// after the other on a thread of its own.
@@ -279,9 +373,67 @@ pub fn spawn_startup_sync(app: &AppHandle) {
     let app = app.clone();
     spawn_sync("meshkeep-sync", move || {
         for root_id in roots {
-            scan_and_tell(&app, &root_id, "startup");
+            scan_and_tell(&app, &root_id, "startup", false);
         }
     });
+}
+
+/// LIB-3, the same catch-up for a watcher that starts while the app runs: a root switched to
+/// watch mode, or a watched root that was unreachable and is back. What changed before the
+/// watcher started is read once, in the background; if a background scan is reading the root
+/// right now, this one follows it.
+pub fn catch_up(app: &AppHandle, root_id: &str) {
+    let (app, root_id) = (app.clone(), root_id.to_string());
+    spawn_sync("meshkeep-sync", move || {
+        scan_and_tell(&app, &root_id, "catchup", true);
+    });
+}
+
+/// Looks at the folders of the watched roots (the poll loop calls this every 30 s). A root
+/// that dropped out loses its watcher, which is dead anyway; a root that is back gets a new
+/// one and is caught up. Without this a drive that was unplugged at start, or for a while,
+/// stayed unwatched until the app was restarted.
+///
+/// Each folder is asked on a thread of its own, at most one per root at a time: a share that
+/// takes long to answer holds up neither the other roots nor the poll loop, and the threads
+/// do not pile up behind it.
+pub fn follow_watched_roots(app: &AppHandle) {
+    let state = app.state::<AppState>();
+    let roots = { state.engine.lock().unwrap().watched_roots() };
+    {
+        let watched: Vec<String> = roots.iter().map(|(id, _)| id.clone()).collect();
+        state.presence.lock().unwrap().retain(&watched);
+    }
+    for (root_id, folder) in roots {
+        if !state.sync.lock().unwrap().probing.insert(root_id.clone()) {
+            continue;
+        }
+        let (handle, id) = (app.clone(), root_id.clone());
+        let started = spawn_sync("meshkeep-probe", move || {
+            let reachable = folder.is_dir();
+            let state = handle.state::<AppState>();
+            state.sync.lock().unwrap().probing.remove(&id);
+            let seen = { state.presence.lock().unwrap().see(&id, reachable) };
+            match seen {
+                Seen::Unchanged => {}
+                Seen::Lost => {
+                    log::info!("root {id} is not reachable any more; its watcher is stopped");
+                    stop_watcher_for(&handle, &id);
+                }
+                // the mode may have changed since the look started: no watcher, no scan then
+                Seen::Back => match start_watcher_for(&handle, &id) {
+                    WatchStart::Started | WatchStart::Failed => {
+                        log::info!("root {id} is back; catching up");
+                        catch_up(&handle, &id);
+                    }
+                    WatchStart::NotWatched | WatchStart::Unreachable => {}
+                },
+            }
+        });
+        if !started {
+            state.sync.lock().unwrap().probing.remove(&root_id);
+        }
+    }
 }
 
 /// What an access to a project found missing on an online root.
@@ -343,7 +495,7 @@ pub fn repair_root(app: &AppHandle, root_id: &str, project_id: &str, missing: Mi
             "root {root_id}: {project_id} {} is gone from disk, reading the root again",
             missing.rel().unwrap_or("(the folder)")
         );
-        let still_missing = match scan_and_tell(&app, &root_id, "resync") {
+        let still_missing = match scan_and_tell(&app, &root_id, "resync", false) {
             // the scan that is reading the root may be the repair; this one did nothing
             Scan::Busy => return,
             Scan::Failed => false,
@@ -370,6 +522,7 @@ pub fn spawn_poll_loop(app: AppHandle) {
         .name("meshkeep-poll".into())
         .spawn(move || loop {
             std::thread::sleep(std::time::Duration::from_secs(30));
+            follow_watched_roots(&app);
             let state = app.state::<AppState>();
             let due = { state.engine.lock().unwrap().poll_due(time::OffsetDateTime::now_utc()) };
             for root_id in due {

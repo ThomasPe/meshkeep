@@ -347,4 +347,34 @@ describe('Meshkeep (library changed outside the app)', () => {
     }
     expect((await list()).some((p) => p.id === old!.id)).toBe(true);
   });
+
+  // a watcher knows nothing of what happened before it started: switching a folder to watch
+  // mode reads it once, so the index does not wait for the next file event
+  it('catches up when a folder is switched to watch mode', async () => {
+    const from = path.join(fixture(), 'Gridfinity', 'Baseplates');
+    const to = path.join(fixture(), 'Gridfinity', 'Baseplates late');
+    type Root = { id: string; mode: string; last_scan: { trigger: string } | null };
+    const roots = async () => await browser.tauri.execute(({ core }) => core.invoke('get_roots')) as Root[];
+    const rootId = (await roots())[0]!.id;
+    await browser.tauri.execute(({ core }, id) => core.invoke('scan_root', { id }), rootId);
+    const old = (await list()).find((p) => p.rel_path === 'Gridfinity/Baseplates');
+    expect(old).toBeDefined();
+    fs.renameSync(from, to);
+    try {
+      expect((await list()).some((p) => p.id === old!.id)).toBe(true); // nobody has told the app
+      await browser.tauri.execute(({ core }, id) => core.invoke('set_root_mode', { id, mode: 'watch' }), rootId);
+      await browser.waitUntil(async () => {
+        const now = await list();
+        return now.some((p) => p.rel_path === 'Gridfinity/Baseplates late') && !now.some((p) => p.id === old!.id);
+      }, { timeout: 20000, timeoutMsg: 'the folder was not read when its watcher started' });
+      expect((await roots()).find((r) => r.id === rootId)?.last_scan?.trigger).toBe('catchup');
+    } finally {
+      // back to a root that is scanned on request only, with the fixture and the index as they were
+      await browser.tauri.execute(({ core }, id) => core.invoke('set_root_mode', { id, mode: 'manual' }), rootId);
+      fs.renameSync(to, from);
+      await browser.tauri.execute(({ core }, id) => core.invoke('scan_root', { id }), rootId);
+    }
+    expect((await roots()).find((r) => r.id === rootId)?.mode).toBe('manual');
+    expect((await list()).some((p) => p.id === old!.id)).toBe(true);
+  });
 });
