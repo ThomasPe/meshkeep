@@ -75,11 +75,12 @@ produced by `release.yml` on tags. Store builds have no updater at all.
 
 `.github/workflows/release.yml` runs on every `v*` tag:
 
-0. **Identity gate.** Before anything is built, `msix/check-store-identity.ps1` checks the
-   three repository variables with the Partner Center identity (below). A tag without
-   them, or with a publisher that does not start with `CN=`, fails the run at once: the
-   workflow used to fall back to the side-load identity and attach a "Store" MSIX that
-   Partner Center rejects on upload. A manual run from a branch ("Run workflow") only warns
+0. **Store gate.** Before anything is built, `msix/check-store-identity.ps1` checks the
+   three repository variables with the Partner Center identity (below) and the package
+   version. A tag without the variables, with a publisher that does not start with `CN=`,
+   or with a version whose first part is 0 fails the run at once: the workflow used to
+   fall back to the side-load identity, and a tag `v0.1.0` would have produced a package
+   `0.1.0.0`; Partner Center rejects both on upload. A manual run from a branch ("Run workflow") only warns
    and packs with the side-load identity, which is enough to try the pipeline. CI runs the
    gate's cases on every push (`msix/check-store-identity.test.ps1`).
 1. **Private installer.** `tauri-apps/tauri-action` builds the NSIS installer. When the
@@ -156,16 +157,29 @@ has to be reinstalled by hand once.
 ### Partner Center identity (Store builds)
 
 Status: account created and the name **Meshkeep** reserved (2026-10-19); the domain
-**meshkeep.app** is registered for the website, support and privacy-policy URLs.
+**meshkeep.app** is registered for the website, support and privacy-policy URLs. The
+product identity is known since 2026-11-23 (below).
 
 1. ~~Create a Microsoft Partner Center developer account.~~ Done.
 2. ~~Reserve the name "Meshkeep".~~ Done. Reservations last three months and are renewed
    by submitting.
-3. Product management → Product identity shows three values. Put them into the repository
-   variables (Settings → Secrets and variables → Actions → Variables):
-   - `MSIX_IDENTITY_NAME` = `Package/Identity/Name` (looks like `12345DevSym.Meshkeep`)
-   - `MSIX_PUBLISHER` = `Package/Identity/Publisher` (`CN=<GUID>`)
-   - `MSIX_PUBLISHER_DISPLAY_NAME` = `Package/Properties/PublisherDisplayName`
+3. Product management → Product identity shows three values. They go into the repository
+   variables (Settings → Secrets and variables → Actions → Variables), exactly as shown:
+
+   | Variable | Partner Center field | Value |
+   |---|---|---|
+   | `MSIX_IDENTITY_NAME` | `Package/Identity/Name` | `18031Medienstudio.net.Meshkeep` |
+   | `MSIX_PUBLISHER` | `Package/Identity/Publisher` | `CN=0CEBA8FF-9F6C-4528-A24A-8C3F8C5E84E3` |
+   | `MSIX_PUBLISHER_DISPLAY_NAME` | `Package/Properties/PublisherDisplayName` | `Medienstudio.net` |
+
+   None of this is secret: every package that ships carries these values in its manifest.
+   They are variables, not part of the manifest in the repository, so that side-load builds
+   keep their own identity and can be installed next to the Store version.
+
+   The Store ID of the product is `9P0BCR7295GS`. Once the first submission is live, the
+   listing is at `https://apps.microsoft.com/detail/9P0BCR7295GS`, and
+   `ms-windows-store://pdp/?productid=9P0BCR7295GS` opens it in the Store app. The website
+   still says "in preparation"; that line becomes this link when the app is published.
 4. Tag a release; upload `Meshkeep_<version>_x64_store.msix` from the release in the
    Packages step of the submission. Until step 3 is done, a tag fails in the identity gate
    and produces no release at all, the private installer included.
@@ -201,7 +215,9 @@ Status: account created and the name **Meshkeep** reserved (2026-10-19); the dom
 
 ## Versioning
 
-The MSIX version has four parts and must increase with every submission. The scripts use
+The MSIX version has four parts and must increase with every submission. The Store
+accepts it only when the first part is 1 or higher and the fourth is 0 (reserved for the
+Store), which is why the first release is 1.0.0 and not 0.1.0. The scripts use
 `<package.json version>.0` by default; the release workflow derives it from the tag
-(`v0.2.1` → `0.2.1.0`). Bump `version` in `package.json`, `src-tauri/tauri.conf.json` and
+(`v1.2.1` → `1.2.1.0`) and its gate rejects a tag that breaks the rule. Bump `version` in `package.json`, `src-tauri/tauri.conf.json` and
 `Cargo.toml` together before tagging.
