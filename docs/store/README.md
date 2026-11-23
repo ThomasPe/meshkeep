@@ -156,16 +156,29 @@ has to be reinstalled by hand once.
 ### Partner Center identity (Store builds)
 
 Status: account created and the name **Meshkeep** reserved (2026-10-19); the domain
-**meshkeep.app** is registered for the website, support and privacy-policy URLs.
+**meshkeep.app** is registered for the website, support and privacy-policy URLs. The
+product identity is known since 2026-11-23 (below).
 
 1. ~~Create a Microsoft Partner Center developer account.~~ Done.
 2. ~~Reserve the name "Meshkeep".~~ Done. Reservations last three months and are renewed
    by submitting.
-3. Product management → Product identity shows three values. Put them into the repository
-   variables (Settings → Secrets and variables → Actions → Variables):
-   - `MSIX_IDENTITY_NAME` = `Package/Identity/Name` (looks like `12345DevSym.Meshkeep`)
-   - `MSIX_PUBLISHER` = `Package/Identity/Publisher` (`CN=<GUID>`)
-   - `MSIX_PUBLISHER_DISPLAY_NAME` = `Package/Properties/PublisherDisplayName`
+3. Product management → Product identity shows three values. They go into the repository
+   variables (Settings → Secrets and variables → Actions → Variables), exactly as shown:
+
+   | Variable | Partner Center field | Value |
+   |---|---|---|
+   | `MSIX_IDENTITY_NAME` | `Package/Identity/Name` | `18031Medienstudio.net.Meshkeep` |
+   | `MSIX_PUBLISHER` | `Package/Identity/Publisher` | `CN=0CEBA8FF-9F6C-4528-A24A-8C3F8C5E84E3` |
+   | `MSIX_PUBLISHER_DISPLAY_NAME` | `Package/Properties/PublisherDisplayName` | `Medienstudio.net` |
+
+   None of this is secret: every package that ships carries these values in its manifest.
+   They are variables, not part of the manifest in the repository, so that side-load builds
+   keep their own identity and can be installed next to the Store version.
+
+   The Store ID of the product is `9P0BCR7295GS`. Once the first submission is live, the
+   listing is at `https://apps.microsoft.com/detail/9P0BCR7295GS`, and
+   `ms-windows-store://pdp/?productid=9P0BCR7295GS` opens it in the Store app. The website
+   still says "in preparation"; that line becomes this link when the app is published.
 4. Tag a release; upload `Meshkeep_<version>_x64_store.msix` from the release in the
    Packages step of the submission. Until step 3 is done, a tag fails in the identity gate
    and produces no release at all, the private installer included.
