@@ -45,9 +45,91 @@ impl RootWatcher {
     }
 }
 
+/// Keeps track of watched roots whose folder is not reachable (a drive that is unplugged, a
+/// share that dropped). A watcher on such a folder is dead and cannot be started, and it
+/// does not come back by itself: the shell looks at the folders now and then, tells this
+/// what it saw, and gets back which roots just dropped out (stop their watcher) and which
+/// are back (start a watcher and catch up with what changed meanwhile, LIB-3).
+#[derive(Debug, Default)]
+pub struct WatchPresence {
+    lost: std::collections::HashSet<String>,
+}
+
+/// What changed between two looks at the watched roots.
+#[derive(Debug, Default, PartialEq, Eq)]
+pub struct PresenceChange {
+    pub lost: Vec<String>,
+    pub back: Vec<String>,
+}
+
+impl WatchPresence {
+    /// A watcher could not be started because the root's folder is not there.
+    pub fn mark_lost(&mut self, root_id: &str) {
+        self.lost.insert(root_id.to_string());
+    }
+
+    pub fn is_lost(&self, root_id: &str) -> bool {
+        self.lost.contains(root_id)
+    }
+
+    /// `seen` is every root in watch mode right now and whether its folder is reachable.
+    /// Roots that are no longer watched (removed, switched to another mode) are forgotten.
+    pub fn update(&mut self, seen: &[(String, bool)]) -> PresenceChange {
+        self.lost.retain(|id| seen.iter().any(|(s, _)| s == id));
+        let mut change = PresenceChange::default();
+        for (id, reachable) in seen {
+            if *reachable {
+                if self.lost.remove(id) {
+                    change.back.push(id.clone());
+                }
+            } else if self.lost.insert(id.clone()) {
+                change.lost.push(id.clone());
+            }
+        }
+        change
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn presence_reports_a_root_once_when_it_drops_out_and_once_when_it_is_back() {
+        let seen = |a: bool, b: bool| vec![("a".to_string(), a), ("b".to_string(), b)];
+        let mut p = WatchPresence::default();
+        assert_eq!(
+            p.update(&seen(true, true)),
+            PresenceChange::default(),
+            "nothing to do while all is there"
+        );
+        assert_eq!(
+            p.update(&seen(true, false)),
+            PresenceChange {
+                lost: vec!["b".into()],
+                back: vec![]
+            }
+        );
+        assert!(p.is_lost("b") && !p.is_lost("a"));
+        assert_eq!(p.update(&seen(true, false)), PresenceChange::default(), "still gone: reported once");
+        assert_eq!(
+            p.update(&seen(true, true)),
+            PresenceChange {
+                lost: vec![],
+                back: vec!["b".into()]
+            }
+        );
+        assert_eq!(p.update(&seen(true, true)), PresenceChange::default(), "back: reported once");
+
+        // a root that was unreachable when its watcher should have started (app start)
+        p.mark_lost("a");
+        assert_eq!(p.update(&seen(true, true)).back, ["a"]);
+
+        // a lost root that is no longer watched is forgotten, also if it is watched again later
+        p.mark_lost("b");
+        assert_eq!(p.update(&[("a".to_string(), true)]), PresenceChange::default());
+        assert_eq!(p.update(&seen(true, true)), PresenceChange::default());
+    }
 
     #[test]
     fn reports_created_files() {

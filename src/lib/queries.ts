@@ -89,8 +89,9 @@ export function patchProject(qc: QueryClient, id: string, patch: Partial<Project
 /**
  * Subscribes once to backend events and keeps the query cache fresh. Scans the backend starts
  * on its own report through `onScan` and end with `onScanEnd`: the catch-up of watched folders
- * at start (`startup`), and the repair after a project folder or file turned out to be gone
- * (`resync`), which also tells the user why the library just changed.
+ * at start (`startup`) or when a watcher starts later (`catchup`: a folder switched to watch
+ * mode, a drive that is back), and the repair after a project folder or file turned out to be
+ * gone (`resync`), which also tells the user why the library just changed.
  */
 export function useBackendEvents(onScan?: (rootId: string, found: number) => void, onScanEnd?: (rootId: string) => void) {
   const qc = useQueryClient();
@@ -106,7 +107,7 @@ export function useBackendEvents(onScan?: (rootId: string, found: number) => voi
         if (e.reason === 'delete' && e.oldId) qc.removeQueries({ queryKey: keys.project(e.oldId) });
         if (e.reason === 'move') for (const id of e.oldIds ?? []) qc.removeQueries({ queryKey: keys.project(id) });
         if (e.reason === 'thumbs_cleared') { useThumbs.setState({ fresh: {} }); forgetAllFileThumbs(); }
-        if ((e.reason === 'startup' || e.reason === 'resync') && e.rootId) onScanEnd?.(e.rootId);
+        if ((e.reason === 'startup' || e.reason === 'resync' || e.reason === 'catchup') && e.rootId) onScanEnd?.(e.rootId);
         if (e.reason === 'resync' && e.report) toast.info(i18n.t('library.changedOutside'), { description: i18n.t('library.changedOutsideHint', { count: e.report.projects }), duration: 10_000 });
         void kickThumbQueue();
       });

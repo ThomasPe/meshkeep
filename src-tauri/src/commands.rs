@@ -325,10 +325,15 @@ pub fn set_root_mode(
     mode: SyncMode,
     poll_interval_secs: Option<u64>,
 ) -> CmdResult<LibraryRoot> {
+    let before = { state.engine.lock().unwrap().root(&id)?.mode };
     let root = { state.engine.lock().unwrap().set_root_mode(&id, mode, poll_interval_secs)? };
     state::stop_watcher_for(&app, &id);
     if mode == SyncMode::Watch {
         state::start_watcher_for(&app, &id);
+        // the new watcher knows nothing of what changed while the root was manual or polled
+        if before != SyncMode::Watch {
+            state::catch_up(&app, &id);
+        }
     }
     Ok(root)
 }

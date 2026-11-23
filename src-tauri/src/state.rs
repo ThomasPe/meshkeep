@@ -56,6 +56,8 @@ pub struct AppState {
     pub watch_tx: mpsc::Sender<WatchEvent>,
     /// Scans the shell started on its own (catch-up at start, repair after a missing folder).
     pub sync: Mutex<BackgroundSync>,
+    /// Watched roots whose folder is not reachable; see `follow_watched_roots`.
+    pub presence: Mutex<meshkeep_engine::watch::WatchPresence>,
     pub ai_keys: crate::keys::AiKeyStore,
     pub config: RuntimeConfig,
     pub data_dir: PathBuf,
@@ -162,8 +164,19 @@ pub fn start_watchers(app: &AppHandle) {
     }
 }
 
+/// Starts the watcher of one root. A root whose folder is not reachable (a drive that is
+/// not plugged in) is not a root that cannot be watched: it gets no "switch to Poll" notice,
+/// and `follow_watched_roots` starts its watcher when the folder is back.
 pub fn start_watcher_for(app: &AppHandle, root_id: &str) {
     let state = app.state::<AppState>();
+    let folder = { state.engine.lock().unwrap().root(root_id).map(|r| r.path) };
+    if let Ok(folder) = folder {
+        if !folder.is_dir() {
+            log::info!("root {root_id} is not reachable; its watcher starts when it is back");
+            state.presence.lock().unwrap().mark_lost(root_id);
+            return;
+        }
+    }
     let result = { state.engine.lock().unwrap().start_watch(root_id, state.watch_tx.clone()) };
     match result {
         Ok(w) => {
@@ -284,6 +297,37 @@ pub fn spawn_startup_sync(app: &AppHandle) {
     });
 }
 
+/// LIB-3, the same catch-up for a watcher that starts while the app runs: a root switched to
+/// watch mode, or a watched root that was unreachable and is back. What changed before the
+/// watcher started is read once, in the background.
+pub fn catch_up(app: &AppHandle, root_id: &str) {
+    let (app, root_id) = (app.clone(), root_id.to_string());
+    spawn_sync("meshkeep-sync", move || {
+        scan_and_tell(&app, &root_id, "catchup");
+    });
+}
+
+/// Looks at the folders of the watched roots (the poll loop calls this every 30 s). A root
+/// that dropped out loses its watcher, which is dead anyway; a root that is back gets a new
+/// one and is caught up. Without this a drive that was unplugged at start, or for a while,
+/// stayed unwatched until the app was restarted.
+pub fn follow_watched_roots(app: &AppHandle) {
+    let state = app.state::<AppState>();
+    let roots = { state.engine.lock().unwrap().watched_roots() };
+    // outside the engine lock: asking for a share that hangs can take long
+    let seen: Vec<(String, bool)> = roots.into_iter().map(|(id, folder)| (id, folder.is_dir())).collect();
+    let change = { state.presence.lock().unwrap().update(&seen) };
+    for root_id in change.lost {
+        log::info!("root {root_id} is not reachable any more; its watcher is stopped");
+        stop_watcher_for(app, &root_id);
+    }
+    for root_id in change.back {
+        log::info!("root {root_id} is back; watching it again and catching up");
+        start_watcher_for(app, &root_id);
+        catch_up(app, &root_id);
+    }
+}
+
 /// What an access to a project found missing on an online root.
 #[derive(Debug, Clone)]
 pub enum Missing {
@@ -370,6 +414,7 @@ pub fn spawn_poll_loop(app: AppHandle) {
         .name("meshkeep-poll".into())
         .spawn(move || loop {
             std::thread::sleep(std::time::Duration::from_secs(30));
+            follow_watched_roots(&app);
             let state = app.state::<AppState>();
             let due = { state.engine.lock().unwrap().poll_due(time::OffsetDateTime::now_utc()) };
             for root_id in due {

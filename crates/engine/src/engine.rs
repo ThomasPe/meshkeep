@@ -1168,7 +1168,7 @@ impl Engine {
         // A share that is not mounted leaves its mount point behind: a folder that exists and
         // is empty. A scan the app started by itself does not take that for "every project was
         // deleted"; the projects stay until the user rescans, which says so.
-        let automatic = matches!(job.trigger.as_str(), "startup" | "resync");
+        let automatic = matches!(job.trigger.as_str(), "startup" | "resync" | "catchup");
         if automatic && outcome.projects.is_empty() && self.index.count(Some(id))?.0 > 0 && dir_is_empty(&root.path) {
             let message = format!(
                 "folder is empty: {} (a share that is not connected?); rescan it if the projects are gone",
@@ -1224,11 +1224,17 @@ impl Engine {
     /// the index until something else triggers a scan. Polled roots come due on their own
     /// (`poll_due`), and a manual root is scanned when the user says so.
     pub fn roots_to_catch_up(&self) -> Vec<String> {
+        self.watched_roots().into_iter().map(|(id, _)| id).collect()
+    }
+
+    /// Every root in watch mode with its folder. The shell looks at the folders itself,
+    /// without the engine lock: a share that hangs must not hold up the window.
+    pub fn watched_roots(&self) -> Vec<(String, PathBuf)> {
         self.roots
             .list()
             .iter()
             .filter(|r| r.mode == SyncMode::Watch)
-            .map(|r| r.id.clone())
+            .map(|r| (r.id.clone(), r.path.clone()))
             .collect()
     }
 
