@@ -458,6 +458,35 @@ fn scan_status_and_creator_filter() {
     assert_eq!(engine.root(&root.id).unwrap().last_error.as_deref(), Some("cannot watch"));
     engine.scan_root(&root.id, |_| {}).unwrap();
     assert!(engine.root(&root.id).unwrap().last_error.is_none(), "a good scan clears the error");
+
+    // "cannot be watched" is the exception: the catch-up scan after a failed watcher start
+    // must not erase the only lasting sign that nothing watches the folder
+    let note = |engine: &Engine| engine.root(&root.id).unwrap().last_error;
+    engine.set_watch_error(&root.id, Some("cannot watch for changes")).unwrap();
+    engine.scan_root_as(&root.id, "catchup", |_| {}).unwrap();
+    assert_eq!(
+        note(&engine).as_deref(),
+        Some("cannot watch for changes"),
+        "kept through a good scan"
+    );
+    // a watcher that starts takes it back
+    engine.set_watch_error(&root.id, None).unwrap();
+    assert_eq!(note(&engine), None);
+    engine.scan_root(&root.id, |_| {}).unwrap();
+    assert_eq!(note(&engine), None, "and it does not come back");
+    // so does a change of the mode: the note belonged to the watcher of the old one
+    engine.set_watch_error(&root.id, Some("cannot watch for changes")).unwrap();
+    engine.set_root_mode(&root.id, SyncMode::Poll, None).unwrap();
+    assert_eq!(note(&engine), None);
+    engine.scan_root(&root.id, |_| {}).unwrap();
+    assert_eq!(note(&engine), None);
+    // taking the note back leaves another problem recorded since alone
+    engine.set_root_mode(&root.id, SyncMode::Manual, None).unwrap();
+    engine.set_watch_error(&root.id, Some("cannot watch for changes")).unwrap();
+    engine.set_root_error(&root.id, "something else").unwrap();
+    engine.set_watch_error(&root.id, None).unwrap();
+    assert_eq!(note(&engine).as_deref(), Some("something else"));
+    engine.scan_root(&root.id, |_| {}).unwrap();
     let by_creator = engine
         .list_projects(&ListQuery {
             creator: Some("lena hofer".into()),

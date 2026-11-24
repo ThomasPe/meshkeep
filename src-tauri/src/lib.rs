@@ -93,6 +93,7 @@ pub fn run() {
             state::spawn_startup_sync(app.handle());
             state::spawn_watch_loop(app.handle().clone(), watch_rx);
             state::spawn_poll_loop(app.handle().clone());
+            state::spawn_presence_loop(app.handle().clone());
             Ok(())
         })
         .invoke_handler(tauri::generate_handler![

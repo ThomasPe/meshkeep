@@ -321,6 +321,9 @@ pub struct Engine {
     page_override: Option<PageFetcher>,
     /// Replaces the picture download (tests): URL -> bytes.
     image_override: Option<ImageFetcher>,
+    /// Roots in watch mode whose folder cannot be watched, with the note shown for them
+    /// (`set_watch_error`). Kept apart from `last_error` because a good scan does not end it.
+    watch_errors: HashMap<String, String>,
 }
 
 /// A stand-in for the network, see `Engine::set_page_fetcher`.
@@ -360,6 +363,7 @@ impl Engine {
             page_cache: HashMap::new(),
             page_override: None,
             image_override: None,
+            watch_errors: HashMap::new(),
         })
     }
 
@@ -1054,10 +1058,15 @@ impl Engine {
     pub fn remove_root(&mut self, id: &str) -> Result<LibraryRoot> {
         let root = self.roots.remove(id)?;
         self.index.remove_root(id)?;
+        self.watch_errors.remove(id);
         Ok(root)
     }
 
     pub fn set_root_mode(&mut self, id: &str, mode: SyncMode, poll_interval_secs: Option<u64>) -> Result<LibraryRoot> {
+        // "cannot be watched" belongs to the watcher of the old mode; a new one says so again
+        if self.watch_errors.contains_key(id) {
+            self.set_watch_error(id, None)?;
+        }
         self.roots.update(id, |r| {
             r.mode = mode;
             if let Some(s) = poll_interval_secs {
@@ -1203,11 +1212,13 @@ impl Engine {
             millis: started.elapsed().as_millis() as u64,
             trigger: job.trigger,
         };
+        // a good scan ends every sync problem but one: a folder nothing watches is still that
+        let watch_error = self.watch_errors.get(id).cloned();
         self.roots.update(id, |r| {
             r.status = RootStatus::Online;
             r.last_scan_at = Some(OffsetDateTime::now_utc());
             r.last_scan = Some(summary);
-            r.last_error = None;
+            r.last_error = watch_error;
         })?;
         Ok(ScanReport {
             root_id: id.to_string(),
@@ -1289,9 +1300,33 @@ impl Engine {
         self.roots.update(id, |r| r.last_error = Some(message.to_string()))
     }
 
+    /// Records that a root in watch mode cannot be watched (`Some`, with the note to show),
+    /// or that it is watched now (`None`). Unlike the other sync problems this one outlives a
+    /// good scan: the catch-up that follows a failed watcher start would otherwise erase the
+    /// only lasting sign that changes in the folder are not picked up. It ends when a
+    /// watcher starts, the mode changes or the root is removed.
+    pub fn set_watch_error(&mut self, id: &str, message: Option<&str>) -> Result<LibraryRoot> {
+        let before = match message {
+            Some(m) => self.watch_errors.insert(id.to_string(), m.to_string()),
+            None => self.watch_errors.remove(id),
+        };
+        self.roots.update(id, |r| match message {
+            Some(m) => r.last_error = Some(m.to_string()),
+            // only the note itself is taken back: another problem recorded since stays
+            None => {
+                if before.is_some() && r.last_error == before {
+                    r.last_error = None;
+                }
+            }
+        })
+    }
+
+    /// Starts a watcher while the caller holds the engine. Registering a recursive watch
+    /// walks the whole tree on some platforms, so the shell uses `RootWatcher::start` with
+    /// the root's path instead and keeps the engine free meanwhile.
     pub fn start_watch(&self, root_id: &str, tx: mpsc::Sender<WatchEvent>) -> Result<RootWatcher> {
         let root = self.root(root_id)?;
-        RootWatcher::start(root.id.clone(), &root.path, Duration::from_millis(750), tx)
+        RootWatcher::start(root.id.clone(), &root.path, crate::watch::DEBOUNCE, tx)
     }
 
     // ---- reading ----------------------------------------------------------------------

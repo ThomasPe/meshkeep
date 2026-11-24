@@ -94,7 +94,9 @@ submission is outside the code: Partner Center identity values, screenshots
       per-root interval (1 min to 3 h) and a 30 s due-check in the shell.
 - [x] **Changes made outside the app** (LIB-3): watched roots are read again at start
       (`state::spawn_startup_sync`) and whenever a watcher starts later (`state::catch_up`:
-      switched to watch mode, or back after being unreachable, `watch::WatchPresence`); a project folder or file that is gone from an online
+      switched to watch mode, or back after being unreachable, `watch::WatchPresence`, looked
+      at every 5 s; a watcher that says it lost events or its folder is read or restarted,
+      `WatchEvent::missed` / `root_gone`); a project folder or file that is gone from an online
       root triggers a rescan of that root and a toast (`Engine::stale_root`,
       `state::repair_root`; a repair that did not help pauses the root for 30 s). These scans read the disk without the engine lock
       (`SharedEngine::scan_root`) and read again if the index was written meanwhile. A root
