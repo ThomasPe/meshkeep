@@ -216,16 +216,17 @@ impl<W> WatchBook<W> {
         self.generation(root_id) == ticket
     }
 
-    /// Installs the watcher a start came back with, replacing the one that was there, and
-    /// settles an older "lost" mark: the folder is there and watched. `false`, and the
-    /// watcher dropped, if the start was overtaken.
-    pub fn install(&mut self, root_id: &str, ticket: u64, watcher: W) -> bool {
+    /// Installs the watcher a start came back with and settles an older "lost" mark: the
+    /// folder is there and watched. `Ok` holds the watcher it replaced, if any; `Err` gives
+    /// the new one back because the start was overtaken. Either way the caller drops what
+    /// it gets after it has let go of the lock: taking a recursive watch down takes time.
+    pub fn install(&mut self, root_id: &str, ticket: u64, watcher: W) -> std::result::Result<Option<W>, W> {
         if !self.is_current(root_id, ticket) {
-            return false;
+            return Err(watcher);
         }
-        self.watchers.insert(root_id.to_string(), (ticket, watcher));
+        let replaced = self.watchers.insert(root_id.to_string(), (ticket, watcher));
         self.presence.see(root_id, true);
-        true
+        Ok(replaced.map(|(_, old)| old))
     }
 
     /// A start found the folder missing: the root counts as lost until a look sees it back.
@@ -239,10 +240,12 @@ impl<W> WatchBook<W> {
     }
 
     /// Takes the root's watcher away (mode changed, root removed, watcher known dead) and
-    /// overtakes every start that has not finished.
-    pub fn stop(&mut self, root_id: &str) {
+    /// overtakes every start that has not finished. The watcher comes back to the caller, to
+    /// be dropped outside the lock.
+    #[must_use = "drop the watcher after releasing the lock"]
+    pub fn stop(&mut self, root_id: &str) -> Option<W> {
         self.bump(root_id);
-        self.watchers.remove(root_id);
+        self.watchers.remove(root_id).map(|(_, watcher)| watcher)
     }
 
     /// The instance of the watcher that is installed for the root, if any.
@@ -261,17 +264,31 @@ impl<W> WatchBook<W> {
 
     /// A look at the root's folder that began at generation `since` came back. If anything
     /// happened to the watcher meanwhile, the look is old and changes nothing. Otherwise:
-    /// `Lost` (the watcher is stopped here), `Back` (the caller starts one and catches up)
-    /// or `Unchanged`.
-    pub fn observe(&mut self, root_id: &str, since: u64, reachable: bool) -> Seen {
+    /// `Lost` (the watcher is stopped here and handed back, to be dropped outside the lock),
+    /// `Back` (the caller starts one and catches up) or `Unchanged`.
+    pub fn observe(&mut self, root_id: &str, since: u64, reachable: bool) -> (Seen, Option<W>) {
         if self.generation(root_id) != since {
-            return Seen::Unchanged;
+            return (Seen::Unchanged, None);
         }
         let seen = self.presence.see(root_id, reachable);
-        if seen == Seen::Lost {
-            self.stop(root_id);
+        let stopped = if seen == Seen::Lost { self.stop(root_id) } else { None };
+        (seen, stopped)
+    }
+
+    /// What to do with a batch from a watcher. Ordinary changes are rescanned whoever sent
+    /// them. What a watcher says about itself counts only from the root's watcher
+    /// (`is_live`): lost events mean the root has to be read as a whole, a root folder that
+    /// went away means the watcher has to be replaced.
+    pub fn verdict(&self, ev: &WatchEvent) -> Verdict {
+        if !(ev.root_gone || ev.missed) {
+            Verdict::Changed
+        } else if !self.is_live(&ev.root_id, ev.instance) {
+            Verdict::Ignore
+        } else if ev.root_gone {
+            Verdict::Replace
+        } else {
+            Verdict::Read
         }
-        seen
     }
 
     pub fn is_lost(&self, root_id: &str) -> bool {
@@ -281,6 +298,65 @@ impl<W> WatchBook<W> {
     /// Forgets the lost marks of roots that are no longer watched.
     pub fn retain(&mut self, watched: &[String]) {
         self.presence.retain(watched);
+    }
+}
+
+/// See [`WatchBook::verdict`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Verdict {
+    /// Files changed: rescan.
+    Changed,
+    /// The watcher lost events: read the whole root.
+    Read,
+    /// The watcher's own folder went away: replace the watcher.
+    Replace,
+    /// A replaced watcher talking about itself: nothing to do.
+    Ignore,
+}
+
+/// One worker per key at a time, and requests that arrive while it works are not lost: they
+/// make it go round once more. For work that must not run twice side by side and where a
+/// later request may know more than the round that is running (replacing a root's watcher).
+#[derive(Debug, Default)]
+pub struct Rounds {
+    /// Keys with a worker; `true` when another round was asked for meanwhile.
+    working: HashMap<String, bool>,
+}
+
+impl Rounds {
+    /// `true`: nobody works on this key, the caller starts the worker. `false`: a worker is
+    /// at it and will go round once more.
+    pub fn request(&mut self, key: &str) -> bool {
+        match self.working.get_mut(key) {
+            Some(again) => {
+                *again = true;
+                false
+            }
+            None => {
+                self.working.insert(key.to_string(), false);
+                true
+            }
+        }
+    }
+
+    /// The worker finished a round. `true`: another was asked for, go again. `false`: done,
+    /// and the next request starts a new worker.
+    pub fn finished(&mut self, key: &str) -> bool {
+        match self.working.get_mut(key) {
+            Some(again) if *again => {
+                *again = false;
+                true
+            }
+            _ => {
+                self.working.remove(key);
+                false
+            }
+        }
+    }
+
+    /// The worker could not be started: the key is free again.
+    pub fn abandon(&mut self, key: &str) {
+        self.working.remove(key);
     }
 }
 
@@ -339,16 +415,20 @@ mod tests {
 
         // a start, alone: installed
         let t = book.begin("r");
-        assert!(book.install("r", t, "first"));
+        assert_eq!(book.install("r", t, "first"), Ok(None));
         assert_eq!(book.installed("r"), Some(t));
 
         // watch -> manual -> watch while the first start is still registering: the old
         // start comes back late, with a watcher or with a failure, and neither counts
         let old = book.begin("r");
-        book.stop("r"); // switched to manual
+        assert_eq!(book.stop("r"), Some("first"), "handed back, to be dropped outside the lock"); // switched to manual
         let new = book.begin("r"); // and back to watch
-        assert!(book.install("r", new, "new"));
-        assert!(!book.install("r", old, "late"), "a late success does not replace the newer watcher");
+        assert_eq!(book.install("r", new, "new"), Ok(None));
+        assert_eq!(
+            book.install("r", old, "late"),
+            Err("late"),
+            "a late success does not replace the newer watcher"
+        );
         assert!(!book.is_current("r", old), "and a late failure is not recorded for a healthy root");
         assert_eq!(book.installed("r"), Some(new));
 
@@ -358,17 +438,21 @@ mod tests {
         let starting = book.begin("r");
         assert!(book.is_live("r", starting), "started, not installed yet");
         assert!(book.is_live("r", new), "the installed one stays the watcher until it is replaced");
-        book.stop("r");
+        assert_eq!(book.stop("r"), Some("new"));
         assert!(!book.is_live("r", starting) && !book.is_live("r", new));
         let t = book.begin("r");
-        assert!(book.install("r", t, "again"));
+        assert_eq!(book.install("r", t, "again"), Ok(None));
 
         // a look saw the folder gone, then a start installed a watcher before the look came
         // back: the look is old, it stops nothing and marks nothing
         let since = book.generation("r");
         let t = book.begin("r");
-        assert!(book.install("r", t, "replacement"));
-        assert_eq!(book.observe("r", since, false), Seen::Unchanged);
+        assert_eq!(
+            book.install("r", t, "replacement"),
+            Ok(Some("again")),
+            "the one it replaces comes back"
+        );
+        assert_eq!(book.observe("r", since, false), (Seen::Unchanged, None));
         assert_eq!(book.installed("r"), Some(t), "the replacement stays");
         assert!(!book.is_lost("r"));
 
@@ -376,15 +460,15 @@ mod tests {
         // counts, and the start that comes back afterwards is dropped with its dead watcher
         let t = book.begin("r");
         let since = book.generation("r");
-        assert_eq!(book.observe("r", since, false), Seen::Lost);
+        assert_eq!(book.observe("r", since, false), (Seen::Lost, Some("replacement")));
         assert_eq!(book.installed("r"), None, "stopped in the same step");
-        assert!(!book.install("r", t, "dead on arrival"));
+        assert_eq!(book.install("r", t, "dead on arrival"), Err("dead on arrival"));
         // back again: the caller starts a watcher, which settles the mark
         let since = book.generation("r");
-        assert_eq!(book.observe("r", since, true), Seen::Back);
+        assert_eq!(book.observe("r", since, true), (Seen::Back, None));
         let t = book.begin("r");
-        assert!(book.install("r", t, "back"));
-        assert_eq!(book.observe("r", book.generation("r"), true), Seen::Unchanged);
+        assert_eq!(book.install("r", t, "back"), Ok(None));
+        assert_eq!(book.observe("r", book.generation("r"), true), (Seen::Unchanged, None));
 
         // a start that finds the folder missing marks the root lost, unless it was overtaken
         let old = book.begin("r");
@@ -395,6 +479,65 @@ mod tests {
         assert!(book.is_lost("r"));
         book.retain(&[]);
         assert!(!book.is_lost("r"), "no longer watched: forgotten");
+    }
+
+    /// What the event loop does with a batch, and whose word about itself it takes.
+    #[test]
+    fn a_batch_is_judged_by_what_it_says_and_who_says_it() {
+        let mut book: WatchBook<()> = WatchBook::default();
+        let ev = |instance: u64, missed: bool, root_gone: bool| WatchEvent {
+            root_id: "r".into(),
+            instance,
+            paths: vec![PathBuf::from("/lib/A")],
+            missed,
+            root_gone,
+        };
+        let old = book.begin("r");
+        assert!(book.install("r", old, ()).is_ok());
+        let _ = book.stop("r");
+        let now = book.begin("r");
+
+        // ordinary changes are rescanned, also from a watcher that is on its way out
+        assert_eq!(book.verdict(&ev(old, false, false)), Verdict::Changed);
+        assert_eq!(book.verdict(&ev(now, false, false)), Verdict::Changed);
+        // the root's watcher is heard, already before it is installed
+        assert_eq!(book.verdict(&ev(now, true, false)), Verdict::Read);
+        assert_eq!(book.verdict(&ev(now, false, true)), Verdict::Replace);
+        assert_eq!(
+            book.verdict(&ev(now, true, true)),
+            Verdict::Replace,
+            "a new watcher is caught up anyway"
+        );
+        assert!(book.install("r", now, ()).is_ok());
+        assert_eq!(book.verdict(&ev(now, false, true)), Verdict::Replace);
+        // a replaced one is not
+        assert_eq!(book.verdict(&ev(old, true, false)), Verdict::Ignore);
+        assert_eq!(book.verdict(&ev(old, false, true)), Verdict::Ignore);
+        // nor is anybody for a root without a watcher
+        assert_eq!(
+            book.verdict(&WatchEvent {
+                root_id: "other".into(),
+                instance: 3,
+                root_gone: true,
+                ..Default::default()
+            }),
+            Verdict::Ignore
+        );
+    }
+
+    #[test]
+    fn rounds_run_one_worker_per_key_and_lose_no_request() {
+        let mut rounds = Rounds::default();
+        assert!(rounds.request("r"), "nobody at it: start the worker");
+        assert!(rounds.request("other"), "another key is another worker");
+        assert!(!rounds.request("r"), "one is at it");
+        assert!(!rounds.request("r"), "and however many ask, it is one more round");
+        assert!(rounds.finished("r"), "go round once more");
+        assert!(!rounds.finished("r"), "nothing asked since: done");
+        assert!(rounds.request("r"), "free again");
+        rounds.abandon("r");
+        assert!(rounds.request("r"), "a worker that could not start leaves the key free");
+        assert!(!rounds.finished("other"));
     }
 
     #[test]

@@ -19,12 +19,12 @@ use crate::roots::RootsStore;
 use crate::scan::{self, IgnoreMatcher, ScanOptions};
 use crate::settings::{McpSettings, NetworkSettings, Settings, SettingsStore};
 use crate::sidecar;
-use crate::watch::{RootWatcher, WatchEvent};
+use crate::watch::WatchEvent;
 use crate::{threemf, thumbs};
 use serde::{Deserialize, Serialize};
 use std::collections::{BTreeMap, HashMap};
 use std::path::{Component, Path, PathBuf};
-use std::sync::{mpsc, Arc};
+use std::sync::Arc;
 use std::time::{Duration, Instant};
 use time::OffsetDateTime;
 
@@ -1064,10 +1064,11 @@ impl Engine {
 
     pub fn set_root_mode(&mut self, id: &str, mode: SyncMode, poll_interval_secs: Option<u64>) -> Result<LibraryRoot> {
         // "cannot be watched" belongs to the watcher of the old mode; a new one says so again
-        if self.watch_errors.contains_key(id) {
-            self.set_watch_error(id, None)?;
-        }
+        let note = self.watch_errors.remove(id);
         self.roots.update(id, |r| {
+            if note.is_some() && r.last_error == note {
+                r.last_error = None;
+            }
             r.mode = mode;
             if let Some(s) = poll_interval_secs {
                 r.poll_interval_secs = s.max(30);
@@ -1310,6 +1311,11 @@ impl Engine {
             Some(m) => self.watch_errors.insert(id.to_string(), m.to_string()),
             None => self.watch_errors.remove(id),
         };
+        // nothing to take back: every watcher that starts says "no error", and that is no
+        // reason to write roots.json again
+        if message.is_none() && before.is_none() {
+            return self.root(id);
+        }
         self.roots.update(id, |r| match message {
             Some(m) => r.last_error = Some(m.to_string()),
             // only the note itself is taken back: another problem recorded since stays
@@ -1319,14 +1325,6 @@ impl Engine {
                 }
             }
         })
-    }
-
-    /// Starts a watcher while the caller holds the engine. Registering a recursive watch
-    /// walks the whole tree on some platforms, so the shell uses `RootWatcher::start` with
-    /// the root's path instead and keeps the engine free meanwhile.
-    pub fn start_watch(&self, root_id: &str, tx: mpsc::Sender<WatchEvent>) -> Result<RootWatcher> {
-        let root = self.root(root_id)?;
-        RootWatcher::start(root.id.clone(), 0, &root.path, crate::watch::DEBOUNCE, tx)
     }
 
     // ---- reading ----------------------------------------------------------------------
