@@ -1326,7 +1326,7 @@ impl Engine {
     /// the root's path instead and keeps the engine free meanwhile.
     pub fn start_watch(&self, root_id: &str, tx: mpsc::Sender<WatchEvent>) -> Result<RootWatcher> {
         let root = self.root(root_id)?;
-        RootWatcher::start(root.id.clone(), &root.path, crate::watch::DEBOUNCE, tx)
+        RootWatcher::start(root.id.clone(), 0, &root.path, crate::watch::DEBOUNCE, tx)
     }
 
     // ---- reading ----------------------------------------------------------------------

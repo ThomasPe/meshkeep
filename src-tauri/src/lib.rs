@@ -77,10 +77,9 @@ pub fn run() {
             }
             let state = AppState {
                 engine: Arc::new(meshkeep_engine::SharedEngine::new(engine)),
-                watchers: Mutex::new(Default::default()),
+                watching: Mutex::new(Default::default()),
                 watch_tx,
                 sync: Mutex::new(Default::default()),
-                presence: Mutex::new(Default::default()),
                 ai_keys: keys::AiKeyStore::new(config.test_mode),
                 config: config.clone(),
                 data_dir,

@@ -5,6 +5,7 @@ use crate::error::{EngineError, Result};
 use notify::event::ModifyKind;
 use notify::{EventKind, RecursiveMode};
 use notify_debouncer_full::{new_debouncer, DebounceEventResult, Debouncer, RecommendedCache};
+use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::sync::mpsc;
 use std::time::Duration;
@@ -15,6 +16,10 @@ pub const DEBOUNCE: Duration = Duration::from_millis(750);
 #[derive(Debug, Clone, Default)]
 pub struct WatchEvent {
     pub root_id: String,
+    /// Which watcher of the root sent this: the `instance` it was started with. A root gets
+    /// a new watcher now and then, and what an old one still has to say about itself
+    /// (`missed`, `root_gone`) is no longer about the watcher that runs.
+    pub instance: u64,
     pub paths: Vec<PathBuf>,
     /// The watcher says it did not see everything: its queue overflowed, or it reported an
     /// error. `paths` is then not all that changed, and the root has to be read as a whole.
@@ -53,7 +58,7 @@ impl RootWatcher {
     /// volume went away without a word. What can be told is told through
     /// [`WatchEvent::missed`] and [`WatchEvent::root_gone`]; the rest is for whoever looks at
     /// the folder now and then ([`WatchPresence`]).
-    pub fn start(root_id: String, path: &Path, debounce: Duration, tx: mpsc::Sender<WatchEvent>) -> Result<RootWatcher> {
+    pub fn start(root_id: String, instance: u64, path: &Path, debounce: Duration, tx: mpsc::Sender<WatchEvent>) -> Result<RootWatcher> {
         let (rid, root) = (root_id.clone(), path.to_path_buf());
         let mut debouncer = new_debouncer(debounce, None, move |res: DebounceEventResult| {
             let (paths, missed, root_gone) = match res {
@@ -68,6 +73,7 @@ impl RootWatcher {
             if !paths.is_empty() || missed || root_gone {
                 let _ = tx.send(WatchEvent {
                     root_id: rid.clone(),
+                    instance,
                     paths,
                     missed,
                     root_gone,
@@ -155,6 +161,120 @@ impl WatchPresence {
     }
 }
 
+/// The watchers of the roots and everything that decides whether one may be installed or
+/// has to go, behind one lock in the shell. Watchers are started outside that lock (a
+/// recursive watch can take seconds to register), folders are looked at outside it too (a
+/// share can hang), and the user changes modes meanwhile. So every result comes back to a
+/// world that may have moved on, and this book tells it so:
+///
+/// - Each root has a generation that counts what happened to its watcher: a start that
+///   began, a stop, a change of mode, a root that dropped out.
+/// - A start takes a ticket (`begin`) and may install its watcher, or record its failure,
+///   only while that ticket is still the generation (`install`, `is_current`). A start
+///   that was overtaken by a stop or by a newer start is dropped.
+/// - A look at a folder notes the generation when it begins and counts only if nothing
+///   happened to the watcher since (`observe`). A root seen gone loses its watcher in the
+///   same step, so no stop is left pending that could remove a watcher installed later.
+///
+/// `W` is the watcher; the book only keeps it alive and drops it.
+#[derive(Debug)]
+pub struct WatchBook<W> {
+    watchers: HashMap<String, (u64, W)>,
+    generation: HashMap<String, u64>,
+    presence: WatchPresence,
+}
+
+impl<W> Default for WatchBook<W> {
+    fn default() -> Self {
+        WatchBook {
+            watchers: HashMap::new(),
+            generation: HashMap::new(),
+            presence: WatchPresence::default(),
+        }
+    }
+}
+
+impl<W> WatchBook<W> {
+    pub fn generation(&self, root_id: &str) -> u64 {
+        self.generation.get(root_id).copied().unwrap_or(0)
+    }
+
+    fn bump(&mut self, root_id: &str) -> u64 {
+        let g = self.generation.entry(root_id.to_string()).or_insert(0);
+        *g += 1;
+        *g
+    }
+
+    /// A start of the root's watcher begins: its ticket, which also overtakes every start
+    /// that began earlier and has not finished.
+    pub fn begin(&mut self, root_id: &str) -> u64 {
+        self.bump(root_id)
+    }
+
+    /// Whether the start with this ticket is still the last thing that happened to the root.
+    pub fn is_current(&self, root_id: &str, ticket: u64) -> bool {
+        self.generation(root_id) == ticket
+    }
+
+    /// Installs the watcher a start came back with, replacing the one that was there, and
+    /// settles an older "lost" mark: the folder is there and watched. `false`, and the
+    /// watcher dropped, if the start was overtaken.
+    pub fn install(&mut self, root_id: &str, ticket: u64, watcher: W) -> bool {
+        if !self.is_current(root_id, ticket) {
+            return false;
+        }
+        self.watchers.insert(root_id.to_string(), (ticket, watcher));
+        self.presence.see(root_id, true);
+        true
+    }
+
+    /// A start found the folder missing: the root counts as lost until a look sees it back.
+    /// `false` if the start was overtaken (nothing is recorded then).
+    pub fn unreachable(&mut self, root_id: &str, ticket: u64) -> bool {
+        if !self.is_current(root_id, ticket) {
+            return false;
+        }
+        self.presence.mark_lost(root_id);
+        true
+    }
+
+    /// Takes the root's watcher away (mode changed, root removed, watcher known dead) and
+    /// overtakes every start that has not finished.
+    pub fn stop(&mut self, root_id: &str) {
+        self.bump(root_id);
+        self.watchers.remove(root_id);
+    }
+
+    /// The instance of the watcher that is installed for the root, if any.
+    pub fn installed(&self, root_id: &str) -> Option<u64> {
+        self.watchers.get(root_id).map(|(instance, _)| *instance)
+    }
+
+    /// A look at the root's folder that began at generation `since` came back. If anything
+    /// happened to the watcher meanwhile, the look is old and changes nothing. Otherwise:
+    /// `Lost` (the watcher is stopped here), `Back` (the caller starts one and catches up)
+    /// or `Unchanged`.
+    pub fn observe(&mut self, root_id: &str, since: u64, reachable: bool) -> Seen {
+        if self.generation(root_id) != since {
+            return Seen::Unchanged;
+        }
+        let seen = self.presence.see(root_id, reachable);
+        if seen == Seen::Lost {
+            self.stop(root_id);
+        }
+        seen
+    }
+
+    pub fn is_lost(&self, root_id: &str) -> bool {
+        self.presence.is_lost(root_id)
+    }
+
+    /// Forgets the lost marks of roots that are no longer watched.
+    pub fn retain(&mut self, watched: &[String]) {
+        self.presence.retain(watched);
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -203,6 +323,60 @@ mod tests {
         assert_eq!(p.update(&seen(true, true)), PresenceChange::default());
     }
 
+    /// The three ways a result can come back to a root that has moved on.
+    #[test]
+    fn the_book_drops_what_was_overtaken() {
+        let mut book: WatchBook<&str> = WatchBook::default();
+
+        // a start, alone: installed
+        let t = book.begin("r");
+        assert!(book.install("r", t, "first"));
+        assert_eq!(book.installed("r"), Some(t));
+
+        // watch -> manual -> watch while the first start is still registering: the old
+        // start comes back late, with a watcher or with a failure, and neither counts
+        let old = book.begin("r");
+        book.stop("r"); // switched to manual
+        let new = book.begin("r"); // and back to watch
+        assert!(book.install("r", new, "new"));
+        assert!(!book.install("r", old, "late"), "a late success does not replace the newer watcher");
+        assert!(!book.is_current("r", old), "and a late failure is not recorded for a healthy root");
+        assert_eq!(book.installed("r"), Some(new));
+
+        // a look saw the folder gone, then a start installed a watcher before the look came
+        // back: the look is old, it stops nothing and marks nothing
+        let since = book.generation("r");
+        let t = book.begin("r");
+        assert!(book.install("r", t, "replacement"));
+        assert_eq!(book.observe("r", since, false), Seen::Unchanged);
+        assert_eq!(book.installed("r"), Some(t), "the replacement stays");
+        assert!(!book.is_lost("r"));
+
+        // the other way round: the folder drops out while a start is registering. The look
+        // counts, and the start that comes back afterwards is dropped with its dead watcher
+        let t = book.begin("r");
+        let since = book.generation("r");
+        assert_eq!(book.observe("r", since, false), Seen::Lost);
+        assert_eq!(book.installed("r"), None, "stopped in the same step");
+        assert!(!book.install("r", t, "dead on arrival"));
+        // back again: the caller starts a watcher, which settles the mark
+        let since = book.generation("r");
+        assert_eq!(book.observe("r", since, true), Seen::Back);
+        let t = book.begin("r");
+        assert!(book.install("r", t, "back"));
+        assert_eq!(book.observe("r", book.generation("r"), true), Seen::Unchanged);
+
+        // a start that finds the folder missing marks the root lost, unless it was overtaken
+        let old = book.begin("r");
+        let t = book.begin("r");
+        assert!(!book.unreachable("r", old));
+        assert!(!book.is_lost("r"));
+        assert!(book.unreachable("r", t));
+        assert!(book.is_lost("r"));
+        book.retain(&[]);
+        assert!(!book.is_lost("r"), "no longer watched: forgotten");
+    }
+
     #[test]
     fn a_batch_says_when_events_were_lost_or_the_root_went_away() {
         use notify::event::{Flag, RemoveKind, RenameMode};
@@ -247,7 +421,7 @@ mod tests {
         let root = dir.path().join("lib");
         std::fs::create_dir_all(root.join("P")).unwrap();
         let (tx, rx) = mpsc::channel();
-        let _w = RootWatcher::start("r1".into(), &root, Duration::from_millis(200), tx).unwrap();
+        let _w = RootWatcher::start("r1".into(), 7, &root, Duration::from_millis(200), tx).unwrap();
         std::thread::sleep(Duration::from_millis(300));
         std::fs::remove_dir_all(&root).unwrap();
         let deadline = std::time::Instant::now() + Duration::from_secs(5);
@@ -262,12 +436,12 @@ mod tests {
     fn reports_created_files() {
         let dir = tempfile::tempdir().unwrap();
         let (tx, rx) = mpsc::channel();
-        let _w = RootWatcher::start("r1".into(), dir.path(), Duration::from_millis(200), tx).unwrap();
+        let _w = RootWatcher::start("r1".into(), 7, dir.path(), Duration::from_millis(200), tx).unwrap();
         std::thread::sleep(Duration::from_millis(300));
         std::fs::create_dir_all(dir.path().join("P")).unwrap();
         std::fs::write(dir.path().join("P/part.stl"), b"x").unwrap();
         let ev = rx.recv_timeout(Duration::from_secs(5)).expect("watch event");
-        assert_eq!(ev.root_id, "r1");
+        assert_eq!((ev.root_id.as_str(), ev.instance), ("r1", 7));
         assert!(
             ev.paths.iter().any(|p| p.ends_with("part.stl") || p.ends_with("P")),
             "{:?}",
