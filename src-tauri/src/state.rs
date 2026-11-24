@@ -229,6 +229,15 @@ pub fn start_watcher_for(app: &AppHandle, root_id: &str) -> WatchStart {
             if !watching.is_current(root_id, ticket) {
                 return WatchStart::Overtaken;
             }
+            // The folder was there a moment ago. If it is gone now, the start failed because
+            // the drive dropped out while the watch was registered, not because the folder
+            // cannot be watched: no "switch to Poll" note, which would outlive every scan
+            // with nobody trying again. The root is lost, and the looks bring it back.
+            if !root.path.is_dir() {
+                watching.unreachable(root_id, ticket);
+                log::info!("root {root_id} dropped out while its watcher was starting ({e})");
+                return WatchStart::Unreachable;
+            }
             log::warn!("cannot watch root {root_id}: {e}");
             let msg = format!("cannot watch for changes ({e}); switch this folder to Poll");
             // kept through the scans that follow, until a watcher starts or the mode changes
@@ -271,9 +280,10 @@ pub fn spawn_watch_loop(app: AppHandle, rx: mpsc::Receiver<WatchEvent>) {
                 // is handled on this thread, which serves every root: replacing a watcher asks
                 // for a folder and registers a watch, and both can take long.
                 if ev.root_gone || ev.missed {
-                    // a watcher that was replaced since has nothing to say about the new one
-                    let current = { app.state::<AppState>().watching.lock().unwrap().installed(&ev.root_id) };
-                    if current != Some(ev.instance) {
+                    // a watcher that was replaced since has nothing to say about the new one;
+                    // one that is started and not installed yet does (`WatchBook::is_live`)
+                    let live = { app.state::<AppState>().watching.lock().unwrap().is_live(&ev.root_id, ev.instance) };
+                    if !live {
                         log::debug!("root {}: ignoring what a replaced watcher says about itself", ev.root_id);
                     } else if ev.root_gone {
                         log::info!("root {}: its folder was removed or renamed; replacing the watcher", ev.root_id);
@@ -426,7 +436,8 @@ pub fn catch_up(app: &AppHandle, root_id: &str) {
 /// The watcher reported that its own folder was removed or renamed: it is dead (or watching
 /// a folder that is no longer the root) and is replaced. If the folder is there (deleted and
 /// made again, or the event was about something that put it back), the new watcher is caught
-/// up at once; if not, the root counts as lost and `follow_watched_roots` brings it back.
+/// up at once; if not, the root is marked offline, counts as lost, and `follow_watched_roots`
+/// brings it back.
 ///
 /// The work runs on a thread of its own, one per root: a request that arrives while the
 /// root's watcher is being replaced does not start a second replacement next to it, it makes
@@ -444,8 +455,13 @@ pub fn restart_watcher(app: &AppHandle, root_id: &str) {
     let (handle, id) = (app.clone(), root_id.to_string());
     let started = spawn_sync("meshkeep-rewatch", move || loop {
         stop_watcher_for(&handle, &id);
-        if matches!(start_watcher_for(&handle, &id), WatchStart::Started | WatchStart::Failed) {
-            catch_up(&handle, &id);
+        // Read the root in every case that is still about this watcher. With the folder there,
+        // that catches up; with the folder gone, the scan is what marks the root and its
+        // projects offline and tells the window (the rescan of such a batch did that before
+        // watchers were replaced here).
+        match start_watcher_for(&handle, &id) {
+            WatchStart::Started | WatchStart::Failed | WatchStart::Unreachable => catch_up(&handle, &id),
+            WatchStart::NotWatched | WatchStart::Overtaken => {}
         }
         let state = handle.state::<AppState>();
         let mut sync = state.sync.lock().unwrap();
@@ -507,7 +523,11 @@ pub fn follow_watched_roots(app: &AppHandle) {
             let seen = { state.watching.lock().unwrap().observe(&id, since, reachable) };
             match seen {
                 Seen::Unchanged => {}
-                Seen::Lost => log::info!("root {id} is not reachable any more; its watcher is stopped"),
+                Seen::Lost => {
+                    log::info!("root {id} is not reachable any more; its watcher is stopped");
+                    // the scan finds the folder missing: the root goes offline, the window hears
+                    catch_up(&handle, &id);
+                }
                 Seen::Back => {
                     if matches!(start_watcher_for(&handle, &id), WatchStart::Started | WatchStart::Failed) {
                         log::info!("root {id} is back; catching up");

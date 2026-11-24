@@ -390,7 +390,7 @@ describe('Meshkeep (library changed outside the app)', () => {
         try { fs.renameSync(from, to); return; } catch (e) { if (attempt === 10) throw e; await browser.pause(300); }
       }
     };
-    type Root = { id: string; status: string };
+    type Root = { id: string; status: string; last_error: string | null };
     const roots = async () => await browser.tauri.execute(({ core }) => core.invoke('get_roots')) as Root[];
     const rootId = (await roots())[0]!.id;
     await browser.tauri.execute(({ core }, id) => core.invoke('scan_root', { id }), rootId);
@@ -398,7 +398,9 @@ describe('Meshkeep (library changed outside the app)', () => {
     try {
       await browser.tauri.execute(({ core }, id) => core.invoke('set_root_mode', { id, mode: 'watch' }), rootId);
       await rename(root, away);
-      await browser.waitUntil(async () => (await roots())[0]!.status === 'offline', { timeout: 10000, timeoutMsg: 'the root is not shown as offline' });
+      // The app notices by itself and records it: the status alone would not show that
+      // (asking for the roots refreshes it), the note comes from the scan that found the folder gone.
+      await browser.waitUntil(async () => { const r = (await roots())[0]!; return r.status === 'offline' && (r.last_error ?? '').includes('not reachable'); }, { timeout: 15000, interval: 500, timeoutMsg: 'the app did not record that the root is gone' });
       await browser.pause(7000); // longer than the time between two looks
       expect((await list()).length).toBe(known); // offline, and its projects are kept
       fs.renameSync(path.join(away, 'Gridfinity', 'Baseplates'), path.join(away, 'Gridfinity', 'Baseplates back'));

@@ -250,6 +250,15 @@ impl<W> WatchBook<W> {
         self.watchers.get(root_id).map(|(instance, _)| *instance)
     }
 
+    /// Whether the watcher started with this instance is the root's watcher: the one that is
+    /// installed, or the one whose start is the last thing that happened to the root. The
+    /// second matters because a watcher runs from the moment it is started and is installed a
+    /// moment later; what it reports in between (its folder is gone already) must not be
+    /// taken for the voice of a replaced watcher.
+    pub fn is_live(&self, root_id: &str, instance: u64) -> bool {
+        self.installed(root_id) == Some(instance) || self.is_current(root_id, instance)
+    }
+
     /// A look at the root's folder that began at generation `since` came back. If anything
     /// happened to the watcher meanwhile, the look is old and changes nothing. Otherwise:
     /// `Lost` (the watcher is stopped here), `Back` (the caller starts one and catches up)
@@ -342,6 +351,17 @@ mod tests {
         assert!(!book.install("r", old, "late"), "a late success does not replace the newer watcher");
         assert!(!book.is_current("r", old), "and a late failure is not recorded for a healthy root");
         assert_eq!(book.installed("r"), Some(new));
+
+        // whose reports about itself count: the installed watcher, and one that is started
+        // and about to be installed; not one that was stopped or overtaken
+        assert!(book.is_live("r", new) && !book.is_live("r", old));
+        let starting = book.begin("r");
+        assert!(book.is_live("r", starting), "started, not installed yet");
+        assert!(book.is_live("r", new), "the installed one stays the watcher until it is replaced");
+        book.stop("r");
+        assert!(!book.is_live("r", starting) && !book.is_live("r", new));
+        let t = book.begin("r");
+        assert!(book.install("r", t, "again"));
 
         // a look saw the folder gone, then a start installed a watcher before the look came
         // back: the look is old, it stops nothing and marks nothing
