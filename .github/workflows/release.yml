@@ -52,9 +52,19 @@ jobs:
       - run: npm ci
 
       # 1. Private build: NSIS installer. With signing secrets the updater is compiled in and
-      #    tauri-action publishes latest.json + .sig next to the installer.
+      #    tauri-action publishes latest.json + .sig next to the installer. Exactly one of the
+      #    two steps may run, so the choice is made once, here. Each step used to test
+      #    `env.TAURI_SIGNING_PRIVATE_KEY` itself: true for the step that sets the variable,
+      #    and also true ("empty") for the step that does not, so both ran and the second
+      #    replaced the signed installer with one that has no updater (v1.0.0, first run).
+      - name: Updater signing key available?
+        id: signing
+        env:
+          KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
+        run: |
+          "available=$(if ($env:KEY) { 'true' } else { 'false' })" >> $env:GITHUB_OUTPUT
       - name: Private installer (with updater)
-        if: ${{ env.TAURI_SIGNING_PRIVATE_KEY != '' }}
+        if: ${{ steps.signing.outputs.available == 'true' }}
         uses: tauri-apps/tauri-action@v0
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
@@ -66,7 +76,7 @@ jobs:
           releaseDraft: true
           args: --features updater --config src-tauri/tauri.updater.conf.json
       - name: Private installer (no updater, no signing key configured)
-        if: ${{ env.TAURI_SIGNING_PRIVATE_KEY == '' }}
+        if: ${{ steps.signing.outputs.available != 'true' }}
         uses: tauri-apps/tauri-action@v0
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
