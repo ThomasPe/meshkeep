@@ -655,7 +655,7 @@ pub fn spawn_poll_loop(app: AppHandle) {
             let due = { state.engine.lock().unwrap().poll_due(time::OffsetDateTime::now_utc()) };
             for root_id in due {
                 log::debug!("poll: rescanning {root_id}");
-                let result = { state.engine.lock().unwrap().scan_root(&root_id, |_| {}) };
+                let result = { state.engine.lock().unwrap().poll_root(&root_id) };
                 match result {
                     Ok(report) => {
                         let _ = app.emit(

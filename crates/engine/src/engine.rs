@@ -1101,6 +1101,14 @@ impl Engine {
         self.scan_root_as(id, "manual", progress)
     }
 
+    /// The scan of a polled root that came due (`poll_due`). Its own entry point so the
+    /// timer cannot pass for the user: a scan the app runs by itself keeps the projects of a
+    /// root folder that turns up empty (a share that is not connected), and the root's status
+    /// says what set the scan off.
+    pub fn poll_root(&mut self, id: &str) -> Result<ScanReport> {
+        self.scan_root_as(id, "poll", |_| {})
+    }
+
     /// Like `scan_root`, recording what triggered the scan in the root's status (LIB-6).
     pub fn scan_root_as(&mut self, id: &str, trigger: &str, progress: impl FnMut(ScanProgress)) -> Result<ScanReport> {
         let job = self.scan_job(id, trigger)?;

@@ -2,7 +2,7 @@
 //! the shell decides what to rescan (see `Engine::rescan_paths`).
 
 use crate::error::{EngineError, Result};
-use notify::event::ModifyKind;
+use notify::event::{AccessKind, AccessMode, ModifyKind};
 use notify::{EventKind, RecursiveMode};
 use notify_debouncer_full::{new_debouncer, DebounceEventResult, Debouncer, RecommendedCache};
 use std::collections::HashMap;
@@ -37,14 +37,17 @@ pub struct RootWatcher {
 /// What one batch of events means for a root: the paths that changed, whether events were
 /// lost (`Flag::Rescan`), and whether the root folder itself went away.
 ///
-/// Events that only say a file or folder was opened, read or closed are not changes and
-/// are left out. inotify reports them, and a scan opens every folder of the root: counted
-/// as changes, each scan set off the next one, without end.
+/// Events that only say a file or folder was opened, read or closed after reading are not
+/// changes and are left out. inotify reports them, and a scan opens every folder of the
+/// root: counted as changes, each scan set off the next one, without end. A file closed
+/// after being open for writing is kept: for a file changed through a memory mapping it is
+/// the only report there is, and nothing the app does while scanning opens a file to write.
 fn digest<'a>(root: &Path, events: impl Iterator<Item = &'a notify::Event>) -> (Vec<PathBuf>, bool, bool) {
     let (mut paths, mut missed, mut root_gone) = (Vec::new(), false, false);
     for e in events {
         missed |= e.need_rescan();
-        if matches!(e.kind, EventKind::Access(_)) {
+        let wrote = matches!(e.kind, EventKind::Access(AccessKind::Close(AccessMode::Write)));
+        if matches!(e.kind, EventKind::Access(_)) && !wrote {
             continue;
         }
         let leaves = matches!(e.kind, EventKind::Remove(_) | EventKind::Modify(ModifyKind::Name(_)));
@@ -702,13 +705,23 @@ mod tests {
         assert_eq!(paths, [PathBuf::from("/lib/A"), "/lib/B".into(), "/lib/C".into()]);
         assert!(!missed && !gone, "a folder below the root is an ordinary change");
 
-        // somebody looked: opening, reading or closing is no change, whatever it is on
+        // somebody looked: opening, reading or closing after reading is no change, whatever
+        // it is on
         let (paths, missed, gone) = run(vec![
             ev(EventKind::Access(AccessKind::Open(AccessMode::Any)), &["/lib"]),
             ev(EventKind::Access(AccessKind::Read), &["/lib/A/a.stl"]),
-            ev(EventKind::Access(AccessKind::Close(AccessMode::Write)), &["/lib/A/a.stl"]),
+            ev(EventKind::Access(AccessKind::Close(AccessMode::Read)), &["/lib/A/a.stl"]),
+            ev(EventKind::Access(AccessKind::Close(AccessMode::Any)), &["/lib/A"]),
         ]);
         assert!(paths.is_empty() && !missed && !gone);
+        // a file closed after writing is one: a change made through a memory mapping
+        // reports nothing else
+        let (paths, missed, gone) = run(vec![
+            ev(EventKind::Access(AccessKind::Open(AccessMode::Any)), &["/lib/A/a.stl"]),
+            ev(EventKind::Access(AccessKind::Close(AccessMode::Write)), &["/lib/A/a.stl"]),
+        ]);
+        assert_eq!(paths, [PathBuf::from("/lib/A/a.stl")]);
+        assert!(!missed && !gone);
 
         // the queue overflowed: an event without a path that says "read everything"
         let (paths, missed, gone) = run(vec![Event::new(EventKind::Other).set_flag(Flag::Rescan)]);
