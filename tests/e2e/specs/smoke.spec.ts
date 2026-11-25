@@ -377,4 +377,47 @@ describe('Meshkeep (library changed outside the app)', () => {
     expect((await roots()).find((r) => r.id === rootId)?.mode).toBe('manual');
     expect((await list()).some((p) => p.id === old!.id)).toBe(true);
   });
+
+  // A watched folder that is gone for a while (a drive unplugged, a share that dropped) has
+  // no watcher when it is back. The app looks at the folders every few seconds, starts the
+  // watcher again and reads what changed meanwhile.
+  it('watches a folder again and catches up when it was gone for a while', async () => {
+    const root = fixture();
+    const away = `${root}.away`;
+    // Windows refuses to rename a folder while something inside is open for a moment
+    const rename = async (from: string, to: string) => {
+      for (let attempt = 1; ; attempt++) {
+        try { fs.renameSync(from, to); return; } catch (e) { if (attempt === 10) throw e; await browser.pause(300); }
+      }
+    };
+    type Root = { id: string; status: string; last_error: string | null };
+    const roots = async () => await browser.tauri.execute(({ core }) => core.invoke('get_roots')) as Root[];
+    const rootId = (await roots())[0]!.id;
+    await browser.tauri.execute(({ core }, id) => core.invoke('scan_root', { id }), rootId);
+    const known = (await list()).length;
+    try {
+      await browser.tauri.execute(({ core }, id) => core.invoke('set_root_mode', { id, mode: 'watch' }), rootId);
+      await rename(root, away);
+      // The app notices by itself and records it: the status alone would not show that
+      // (asking for the roots refreshes it), the note comes from the scan that found the folder gone.
+      await browser.waitUntil(async () => { const r = (await roots())[0]!; return r.status === 'offline' && (r.last_error ?? '').includes('not reachable'); }, { timeout: 15000, interval: 500, timeoutMsg: 'the app did not record that the root is gone' });
+      await browser.pause(7000); // longer than the time between two looks
+      expect((await list()).length).toBe(known); // offline, and its projects are kept
+      fs.renameSync(path.join(away, 'Gridfinity', 'Baseplates'), path.join(away, 'Gridfinity', 'Baseplates back'));
+      await rename(away, root);
+      await browser.waitUntil(async () => (await list()).some((p) => p.rel_path === 'Gridfinity/Baseplates back'), { timeout: 30000, interval: 500, timeoutMsg: 'not caught up after the folder came back' });
+      // and the new watcher reports what happens from now on
+      fs.mkdirSync(path.join(root, 'Fresh'));
+      fs.writeFileSync(path.join(root, 'Fresh', 'fresh.stl'), 'solid fresh\nendsolid fresh\n');
+      await browser.waitUntil(async () => (await list()).some((p) => p.rel_path === 'Fresh'), { timeout: 20000, interval: 500, timeoutMsg: 'the new watcher reported nothing' });
+    } finally {
+      await browser.tauri.execute(({ core }, id) => core.invoke('set_root_mode', { id, mode: 'manual' }), rootId);
+      if (fs.existsSync(away)) await rename(away, root);
+      const back = path.join(root, 'Gridfinity', 'Baseplates back');
+      if (fs.existsSync(back)) fs.renameSync(back, path.join(root, 'Gridfinity', 'Baseplates'));
+      fs.rmSync(path.join(root, 'Fresh'), { recursive: true, force: true });
+      await browser.tauri.execute(({ core }, id) => core.invoke('scan_root', { id }), rootId);
+    }
+    expect((await list()).length).toBe(known);
+  });
 });
