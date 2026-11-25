@@ -66,6 +66,10 @@ jobs:
       # release.yml only runs on tags; its gate for the Partner Center identity is tested here.
       - name: Release gate (Store identity check, all cases)
         run: ./msix/check-store-identity.test.ps1
+      # What the stamped manifest says about Windows is checked by nothing else before Partner
+      # Center does: a side-loaded package installs with any MinVersion.
+      - name: Package manifest stamp (version, identity, Windows versions)
+        run: ./msix/stamp-manifest.test.ps1
       - uses: actions/setup-node@v5
         with: { node-version: 22, cache: npm }
       - uses: dtolnay/rust-toolchain@stable

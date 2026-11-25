@@ -48,12 +48,10 @@ New-Item -ItemType Directory -Path $layout | Out-Null
 Copy-Item $exe $layout
 Copy-Item -Recurse (Join-Path $PSScriptRoot "Assets") (Join-Path $layout "Assets")
 $manifest = Join-Path $layout "AppxManifest.xml"
-$xml = Get-Content (Join-Path $PSScriptRoot "AppxManifest.xml") -Raw
-$xml = $xml -replace 'Version="\d+\.\d+\.\d+\.\d+"', "Version=`"$Version`""
-$xml = $xml -replace 'Identity Name="[^"]+"', "Identity Name=`"$IdentityName`""
-$xml = $xml -replace 'Publisher="[^"]+"', "Publisher=`"$Publisher`""
-$xml = $xml -replace '<PublisherDisplayName>[^<]*</PublisherDisplayName>', "<PublisherDisplayName>$PublisherDisplayName</PublisherDisplayName>"
-Set-Content $manifest $xml -Encoding UTF8
+# Version and identity go in through stamp-manifest.ps1, which touches nothing else and
+# refuses a manifest the Store would not take.
+& (Join-Path $PSScriptRoot "stamp-manifest.ps1") -Out $manifest -Version $Version -IdentityName $IdentityName `
+  -Publisher $Publisher -PublisherDisplayName $PublisherDisplayName
 
 # 1b. resources.pri. The manifest names `Assets\Square44x44Logo.png`; which file Windows
 #     shows for it (scale-200, targetsize-24_altform-unplated, ...) is looked up in this

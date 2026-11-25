@@ -90,7 +90,10 @@ produced by `release.yml` on tags. Store builds have no updater at all.
 2. **Store flavor.** `npm run tauri:build:store`, then `msix/build-msix.ps1 -Store` packs an
    **unsigned** MSIX for Partner Center (the Store signs on submission) with the identity
    from the repository variables `MSIX_IDENTITY_NAME`, `MSIX_PUBLISHER`,
-   `MSIX_PUBLISHER_DISPLAY_NAME`.
+   `MSIX_PUBLISHER_DISPLAY_NAME`. Version and identity are written into the manifest by
+   `msix/stamp-manifest.ps1`, which changes those four values and nothing else and refuses
+   a manifest whose `MinVersion` the Store does not take (see "Versioning"). CI runs its
+   cases on every push (`msix/stamp-manifest.test.ps1`).
 3. **Side-load check.** The same exe is packed and self-signed, installed with
    `Add-AppxPackage`, asked for an MCP answer through its app execution alias (see
    "Inside the package" below), launched through its AUMID, and removed
@@ -221,3 +224,11 @@ Store), which is why the first release is 1.0.0 and not 0.1.0. The scripts use
 `<package.json version>.0` by default; the release workflow derives it from the tag
 (`v1.2.1` → `1.2.1.0`) and its gate rejects a tag that breaks the rule. Bump `version` in `package.json`, `src-tauri/tauri.conf.json` and
 `Cargo.toml` together before tagging.
+
+The package version is not the only version in the manifest: `TargetDeviceFamily` carries
+`MinVersion` and `MaxVersionTested`, which are Windows versions. Partner Center refuses an
+MSIX whose `MinVersion` is 10.0.17134.0 (Windows 10 1803) or lower; the manifest says
+10.0.17763.0. The first 1.0.0 package was refused for exactly that on 2026-11-25: the pack
+script replaced every `Version="a.b.c.d"` in the text, which also matches inside
+`MinVersion="…"`, so the package claimed Windows 1.0.0.0. Side-loading installs such a
+package, which is why the round trip in CI never noticed.
