@@ -476,6 +476,17 @@ fn scan_status_and_creator_filter() {
     assert_eq!(note(&engine), None, "and it does not come back");
     // so does a change of the mode: the note belonged to the watcher of the old one
     engine.set_watch_error(&root.id, Some("cannot watch for changes")).unwrap();
+    // (a call that leaves the mode as it is changes no watcher, so the note stays)
+    let mode = engine.root(&root.id).unwrap().mode;
+    engine.set_root_mode(&root.id, mode, Some(120)).unwrap();
+    assert_eq!(note(&engine).as_deref(), Some("cannot watch for changes"));
+    assert_eq!(engine.root(&root.id).unwrap().poll_interval_secs, 120);
+    engine.scan_root(&root.id, |_| {}).unwrap();
+    assert_eq!(
+        note(&engine).as_deref(),
+        Some("cannot watch for changes"),
+        "still kept through scans"
+    );
     engine.set_root_mode(&root.id, SyncMode::Poll, None).unwrap();
     assert_eq!(note(&engine), None);
     engine.scan_root(&root.id, |_| {}).unwrap();
@@ -1946,13 +1957,15 @@ fn a_root_that_is_gone_or_empty_keeps_its_projects() {
 
     // a mount point without its share: the folder exists and is empty
     let shared = SharedEngine::new(engine);
-    for trigger in ["startup", "resync", "catchup"] {
+    for trigger in ["startup", "resync", "catchup", "watch", "poll", "import"] {
         assert!(
             matches!(shared.scan_root(&root.id, trigger, |_| {}), Err(EngineError::RootOffline(_))),
             "{trigger}"
         );
     }
     let mut engine = shared.lock().unwrap();
+    // the poll timer's own entry point is such a scan too, and says so in the status
+    assert!(matches!(engine.poll_root(&root.id), Err(EngineError::RootOffline(_))));
     assert_eq!(listed(&engine).len(), 2, "kept");
     assert!(listed(&engine).iter().all(|p| p.offline));
     let problem = status(&mut engine).last_error.unwrap_or_default();
@@ -1961,6 +1974,11 @@ fn a_root_that_is_gone_or_empty_keeps_its_projects() {
     // the user's own rescan is the confirmation that the projects are gone
     assert_eq!(engine.scan_root(&root.id, |_| {}).unwrap().projects, 0);
     assert!(listed(&engine).is_empty());
+    assert_eq!(status(&mut engine).last_scan.unwrap().trigger, "manual");
+    // with the folder filled again, a poll is an ordinary scan
+    touch(&lib.path().join("A/a.stl"), 100);
+    assert_eq!(engine.poll_root(&root.id).unwrap().projects, 1);
+    assert_eq!(status(&mut engine).last_scan.unwrap().trigger, "poll");
 }
 
 /// An entry that was taken out of a packed project's archive: the archive is there, so only

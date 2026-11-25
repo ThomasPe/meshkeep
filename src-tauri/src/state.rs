@@ -1,5 +1,5 @@
 use meshkeep_engine::model::SyncMode;
-use meshkeep_engine::watch::{RootWatcher, Rounds, Seen, Verdict, WatchBook, WatchEvent, DEBOUNCE};
+use meshkeep_engine::watch::{look, RootWatcher, Rounds, Seen, Verdict, WatchBook, WatchEvent, DEBOUNCE};
 use meshkeep_engine::SharedEngine;
 use std::collections::{HashMap, HashSet};
 use std::path::PathBuf;
@@ -206,7 +206,10 @@ pub fn start_watcher_for(app: &AppHandle, root_id: &str) -> WatchStart {
         };
         (root, watching.begin(root_id))
     };
-    if !root.path.is_dir() {
+    // Where the folder is before the watch is registered: if a share is mounted over it in
+    // between, the watcher is on the old folder and the next look sees the volume differ.
+    let found = look(&root.path);
+    if !found.reachable {
         if !state.watching.lock().unwrap().unreachable(root_id, ticket) {
             return WatchStart::Overtaken;
         }
@@ -221,7 +224,7 @@ pub fn start_watcher_for(app: &AppHandle, root_id: &str) -> WatchStart {
     // takes time, and every root's bookkeeping waits on this lock.
     let mut watching = state.watching.lock().unwrap();
     let (outcome, _dropped_after_the_lock) = match started {
-        Ok(watcher) => match watching.install(root_id, ticket, watcher) {
+        Ok(watcher) => match watching.install(root_id, ticket, found.volume, watcher) {
             Err(overtaken) => (WatchStart::Overtaken, Some(overtaken)),
             Ok(replaced) => {
                 let _ = state.engine.lock().unwrap().set_watch_error(root_id, None);
@@ -267,6 +270,11 @@ pub fn change_root<T>(
         (out, watching.stop(root_id))
     };
     Ok(out)
+}
+
+/// Whether a watcher is installed for the root right now.
+pub fn is_watching(app: &AppHandle, root_id: &str) -> bool {
+    app.state::<AppState>().watching.lock().unwrap().installed(root_id).is_some()
 }
 
 pub fn stop_watcher_for(app: &AppHandle, root_id: &str) {
@@ -499,6 +507,11 @@ pub fn spawn_presence_loop(app: AppHandle) {
 /// one and is caught up. Without this a drive that was unplugged at start, or for a while,
 /// stayed unwatched until the app was restarted.
 ///
+/// A folder can also stay where it is and still stop being the folder that is watched: a
+/// mount point looks the same with and without its share. On Unix the look compares the
+/// volume the folder is on with the one it was on when the watcher started
+/// (`watch::volume_of`) and replaces the watcher when they differ.
+///
 /// Each folder is asked on a thread of its own, at most one per root at a time: a share that
 /// takes long to answer holds up neither the other roots nor the poll loop, and the threads
 /// do not pile up behind it.
@@ -517,13 +530,20 @@ pub fn follow_watched_roots(app: &AppHandle) {
         let since = state.watching.lock().unwrap().generation(&root_id);
         let (handle, id) = (app.clone(), root_id.clone());
         let started = spawn_sync("meshkeep-probe", move || {
-            let reachable = folder.is_dir();
+            let found = look(&folder);
             let state = handle.state::<AppState>();
             // seeing it gone and stopping its watcher is one step (`WatchBook::observe`); the
             // stopped watcher is dropped here, after the lock
-            let (seen, _dropped_after_the_lock) = { state.watching.lock().unwrap().observe(&id, since, reachable) };
+            let (seen, _dropped_after_the_lock) = { state.watching.lock().unwrap().observe(&id, since, found) };
             match seen {
                 Seen::Unchanged => {}
+                // A share was mounted over the folder or taken away from it: the watcher was
+                // on what is no longer there. A new one, and a scan, which finds either the
+                // share's projects or an empty mount point (the root then goes offline, LIB-5).
+                Seen::Moved => {
+                    log::info!("root {id} is on another volume than its watcher was; replacing the watcher");
+                    restart_watcher(&handle, &id);
+                }
                 Seen::Lost => {
                     log::info!("root {id} is not reachable any more; its watcher is stopped");
                     // the scan finds the folder missing: the root goes offline, the window hears
@@ -635,7 +655,7 @@ pub fn spawn_poll_loop(app: AppHandle) {
             let due = { state.engine.lock().unwrap().poll_due(time::OffsetDateTime::now_utc()) };
             for root_id in due {
                 log::debug!("poll: rescanning {root_id}");
-                let result = { state.engine.lock().unwrap().scan_root(&root_id, |_| {}) };
+                let result = { state.engine.lock().unwrap().poll_root(&root_id) };
                 match result {
                     Ok(report) => {
                         let _ = app.emit(

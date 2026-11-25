@@ -101,6 +101,9 @@ submission is outside the code: Partner Center identity values, screenshots
       `state::repair_root`; a repair that did not help pauses the root for 30 s). These scans read the disk without the engine lock
       (`SharedEngine::scan_root`) and read again if the index was written meanwhile. A root
       that drops out during a scan, or comes up as an empty folder, keeps its projects (LIB-5).
+      A mount point that gains or loses its share is told by its volume (`watch::volume_of`,
+      Unix). Events that only report reading are no changes: counted as such, every scan of a
+      watched root on Linux set off the next one.
 - [x] **Offline handling** (LIB-5).
 - [x] **Sync status & background activity** (LIB-6, LIB-7, APP-7): per-root last scan
       summary (counts, duration, trigger, scanner notes) and last sync problem in settings;
