@@ -476,6 +476,17 @@ fn scan_status_and_creator_filter() {
     assert_eq!(note(&engine), None, "and it does not come back");
     // so does a change of the mode: the note belonged to the watcher of the old one
     engine.set_watch_error(&root.id, Some("cannot watch for changes")).unwrap();
+    // (a call that leaves the mode as it is changes no watcher, so the note stays)
+    let mode = engine.root(&root.id).unwrap().mode;
+    engine.set_root_mode(&root.id, mode, Some(120)).unwrap();
+    assert_eq!(note(&engine).as_deref(), Some("cannot watch for changes"));
+    assert_eq!(engine.root(&root.id).unwrap().poll_interval_secs, 120);
+    engine.scan_root(&root.id, |_| {}).unwrap();
+    assert_eq!(
+        note(&engine).as_deref(),
+        Some("cannot watch for changes"),
+        "still kept through scans"
+    );
     engine.set_root_mode(&root.id, SyncMode::Poll, None).unwrap();
     assert_eq!(note(&engine), None);
     engine.scan_root(&root.id, |_| {}).unwrap();
@@ -1946,7 +1957,7 @@ fn a_root_that_is_gone_or_empty_keeps_its_projects() {
 
     // a mount point without its share: the folder exists and is empty
     let shared = SharedEngine::new(engine);
-    for trigger in ["startup", "resync", "catchup"] {
+    for trigger in ["startup", "resync", "catchup", "watch", "poll", "import"] {
         assert!(
             matches!(shared.scan_root(&root.id, trigger, |_| {}), Err(EngineError::RootOffline(_))),
             "{trigger}"

@@ -325,11 +325,25 @@ pub fn set_root_mode(
     poll_interval_secs: Option<u64>,
 ) -> CmdResult<LibraryRoot> {
     let before = { state.engine.lock().unwrap().root(&id)?.mode };
+    // Watch stays watch (the call changes something else, like the poll interval): a watcher
+    // that runs is left alone. Replacing it would lose what happens between the old one and
+    // the new one, with no catch-up to make up for it. One that is not running (it could not
+    // start, or the folder was gone) gets another try, and then a catch-up.
+    if before == SyncMode::Watch && mode == SyncMode::Watch {
+        let root = { state.engine.lock().unwrap().set_root_mode(&id, mode, poll_interval_secs)? };
+        if !state::is_watching(&app, &id) {
+            let start = state::start_watcher_for(&app, &id);
+            if matches!(start, state::WatchStart::Started | state::WatchStart::Failed) {
+                state::catch_up(&app, &id);
+            }
+        }
+        return Ok(root);
+    }
     let root = state::change_root(&app, &id, |engine| engine.set_root_mode(&id, mode, poll_interval_secs))?;
     if mode == SyncMode::Watch {
         let start = state::start_watcher_for(&app, &id);
         // the new watcher knows nothing of what changed while the root was manual or polled
-        if before != SyncMode::Watch && matches!(start, state::WatchStart::Started | state::WatchStart::Failed) {
+        if matches!(start, state::WatchStart::Started | state::WatchStart::Failed) {
             state::catch_up(&app, &id);
         }
     }

@@ -36,10 +36,17 @@ pub struct RootWatcher {
 
 /// What one batch of events means for a root: the paths that changed, whether events were
 /// lost (`Flag::Rescan`), and whether the root folder itself went away.
+///
+/// Events that only say a file or folder was opened, read or closed are not changes and
+/// are left out. inotify reports them, and a scan opens every folder of the root: counted
+/// as changes, each scan set off the next one, without end.
 fn digest<'a>(root: &Path, events: impl Iterator<Item = &'a notify::Event>) -> (Vec<PathBuf>, bool, bool) {
     let (mut paths, mut missed, mut root_gone) = (Vec::new(), false, false);
     for e in events {
         missed |= e.need_rescan();
+        if matches!(e.kind, EventKind::Access(_)) {
+            continue;
+        }
         let leaves = matches!(e.kind, EventKind::Remove(_) | EventKind::Modify(ModifyKind::Name(_)));
         root_gone |= leaves && e.paths.iter().any(|p| p == root);
         paths.extend(e.paths.iter().cloned());
@@ -114,6 +121,56 @@ pub enum Seen {
     Lost,
     /// Back after being gone: start a watcher and catch up.
     Back,
+    /// There, but on another volume than when its watcher started: a share was mounted over
+    /// the folder or taken away from it. The watcher still watches what was there before and
+    /// has been stopped; start a new one and read the root.
+    Moved,
+}
+
+/// What one look at a root's folder found.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Look {
+    pub reachable: bool,
+    /// The volume the folder is on, see [`volume_of`]. `None` when it is not reachable or
+    /// the platform does not tell.
+    pub volume: Option<u64>,
+}
+
+/// Looks at a folder once: is it there, and on which volume.
+pub fn look(path: &Path) -> Look {
+    match std::fs::metadata(path) {
+        Ok(meta) if meta.is_dir() => Look {
+            reachable: true,
+            volume: volume_from(&meta),
+        },
+        _ => Look {
+            reachable: false,
+            volume: None,
+        },
+    }
+}
+
+/// The volume a folder is on: the device number of its file system on Unix, nothing
+/// elsewhere. It tells a mount point with its share from the same mount point without it,
+/// which looks like any other folder: when a share is mounted or unmounted, the folder at
+/// that path moves to another file system. Only the device is compared, not the inode: some
+/// network file systems hand out inode numbers that change while nothing happened.
+///
+/// On Windows a share or drive that goes away takes its path with it, so the folder is
+/// simply not reachable and this is not needed.
+pub fn volume_of(path: &Path) -> Option<u64> {
+    std::fs::metadata(path).ok().and_then(|meta| volume_from(&meta))
+}
+
+#[cfg(unix)]
+fn volume_from(meta: &std::fs::Metadata) -> Option<u64> {
+    use std::os::unix::fs::MetadataExt;
+    Some(meta.dev())
+}
+
+#[cfg(not(unix))]
+fn volume_from(_meta: &std::fs::Metadata) -> Option<u64> {
+    None
 }
 
 impl WatchPresence {
@@ -154,7 +211,8 @@ impl WatchPresence {
             match self.see(id, *reachable) {
                 Seen::Lost => change.lost.push(id.clone()),
                 Seen::Back => change.back.push(id.clone()),
-                Seen::Unchanged => {}
+                // `see` knows presence only; a moved folder is the book's finding
+                Seen::Unchanged | Seen::Moved => {}
             }
         }
         change
@@ -179,7 +237,9 @@ impl WatchPresence {
 /// `W` is the watcher; the book only keeps it alive and drops it.
 #[derive(Debug)]
 pub struct WatchBook<W> {
-    watchers: HashMap<String, (u64, W)>,
+    /// Per root: the instance of its watcher, the volume its folder was on when the watcher
+    /// started, and the watcher.
+    watchers: HashMap<String, (u64, Option<u64>, W)>,
     generation: HashMap<String, u64>,
     presence: WatchPresence,
 }
@@ -217,16 +277,18 @@ impl<W> WatchBook<W> {
     }
 
     /// Installs the watcher a start came back with and settles an older "lost" mark: the
-    /// folder is there and watched. `Ok` holds the watcher it replaced, if any; `Err` gives
+    /// folder is there and watched. `volume` is where the folder was when the start looked at
+    /// it, before the watch was registered, so a share that is mounted in between shows up
+    /// as a move at the next look. `Ok` holds the watcher it replaced, if any; `Err` gives
     /// the new one back because the start was overtaken. Either way the caller drops what
     /// it gets after it has let go of the lock: taking a recursive watch down takes time.
-    pub fn install(&mut self, root_id: &str, ticket: u64, watcher: W) -> std::result::Result<Option<W>, W> {
+    pub fn install(&mut self, root_id: &str, ticket: u64, volume: Option<u64>, watcher: W) -> std::result::Result<Option<W>, W> {
         if !self.is_current(root_id, ticket) {
             return Err(watcher);
         }
-        let replaced = self.watchers.insert(root_id.to_string(), (ticket, watcher));
+        let replaced = self.watchers.insert(root_id.to_string(), (ticket, volume, watcher));
         self.presence.see(root_id, true);
-        Ok(replaced.map(|(_, old)| old))
+        Ok(replaced.map(|(_, _, old)| old))
     }
 
     /// A start found the folder missing: the root counts as lost until a look sees it back.
@@ -245,12 +307,12 @@ impl<W> WatchBook<W> {
     #[must_use = "drop the watcher after releasing the lock"]
     pub fn stop(&mut self, root_id: &str) -> Option<W> {
         self.bump(root_id);
-        self.watchers.remove(root_id).map(|(_, watcher)| watcher)
+        self.watchers.remove(root_id).map(|(_, _, watcher)| watcher)
     }
 
     /// The instance of the watcher that is installed for the root, if any.
     pub fn installed(&self, root_id: &str) -> Option<u64> {
-        self.watchers.get(root_id).map(|(instance, _)| *instance)
+        self.watchers.get(root_id).map(|(instance, _, _)| *instance)
     }
 
     /// Whether the watcher started with this instance is the root's watcher: the one that is
@@ -264,14 +326,26 @@ impl<W> WatchBook<W> {
 
     /// A look at the root's folder that began at generation `since` came back. If anything
     /// happened to the watcher meanwhile, the look is old and changes nothing. Otherwise:
-    /// `Lost` (the watcher is stopped here and handed back, to be dropped outside the lock),
-    /// `Back` (the caller starts one and catches up) or `Unchanged`.
-    pub fn observe(&mut self, root_id: &str, since: u64, reachable: bool) -> (Seen, Option<W>) {
+    /// `Lost` or `Moved` (the watcher is stopped here and handed back, to be dropped outside
+    /// the lock), `Back` (the caller starts one and catches up) or `Unchanged`.
+    pub fn observe(&mut self, root_id: &str, since: u64, look: Look) -> (Seen, Option<W>) {
         if self.generation(root_id) != since {
             return (Seen::Unchanged, None);
         }
-        let seen = self.presence.see(root_id, reachable);
-        let stopped = if seen == Seen::Lost { self.stop(root_id) } else { None };
+        let mut seen = self.presence.see(root_id, look.reachable);
+        // there as before, and watched: is it still the folder the watcher was started on?
+        if seen == Seen::Unchanged && look.reachable {
+            if let Some((_, Some(watched), _)) = self.watchers.get(root_id) {
+                if look.volume.is_some_and(|now| now != *watched) {
+                    seen = Seen::Moved;
+                }
+            }
+        }
+        let stopped = if matches!(seen, Seen::Lost | Seen::Moved) {
+            self.stop(root_id)
+        } else {
+            None
+        };
         (seen, stopped)
     }
 
@@ -408,6 +482,77 @@ mod tests {
         assert_eq!(p.update(&seen(true, true)), PresenceChange::default());
     }
 
+    const THERE: Look = Look {
+        reachable: true,
+        volume: None,
+    };
+    const GONE: Look = Look {
+        reachable: false,
+        volume: None,
+    };
+
+    /// A share mounted over a watched folder, or taken away from it, leaves a folder at the
+    /// same path: only the volume tells. The watcher goes, the caller starts a new one.
+    #[test]
+    fn a_folder_that_moved_to_another_volume_loses_its_watcher() {
+        let on = |volume: u64| Look {
+            reachable: true,
+            volume: Some(volume),
+        };
+        let mut book: WatchBook<&str> = WatchBook::default();
+        // the app starts while the share is not mounted: the watcher is on the mount point
+        let t = book.begin("r");
+        assert_eq!(book.install("r", t, Some(1), "on the mount point"), Ok(None));
+        assert_eq!(book.observe("r", book.generation("r"), on(1)), (Seen::Unchanged, None));
+        // the share is mounted: same path, another volume
+        assert_eq!(
+            book.observe("r", book.generation("r"), on(7)),
+            (Seen::Moved, Some("on the mount point"))
+        );
+        assert_eq!(book.installed("r"), None, "stopped in the same step");
+        assert!(!book.is_lost("r"), "it is there, so nothing waits for it to come back");
+        let t = book.begin("r");
+        assert_eq!(book.install("r", t, Some(7), "on the share"), Ok(None));
+        assert_eq!(book.observe("r", book.generation("r"), on(7)), (Seen::Unchanged, None));
+        // and unmounted again
+        assert_eq!(book.observe("r", book.generation("r"), on(1)), (Seen::Moved, Some("on the share")));
+
+        // a look that is old does not count here either
+        let t = book.begin("r");
+        let since = book.generation("r");
+        assert_eq!(book.install("r", t, Some(1), "again"), Ok(None));
+        let newer = book.begin("r");
+        assert_eq!(book.observe("r", since, on(7)), (Seen::Unchanged, None));
+        assert_eq!(book.install("r", newer, Some(1), "newest"), Ok(Some("again")));
+
+        // where the platform does not tell the volume (either side unknown), nothing is concluded
+        assert_eq!(book.observe("r", book.generation("r"), THERE), (Seen::Unchanged, None));
+        let t = book.begin("r");
+        assert_eq!(book.install("r", t, None, "no volume known"), Ok(Some("newest")));
+        assert_eq!(book.observe("r", book.generation("r"), on(7)), (Seen::Unchanged, None));
+        // a folder that is gone is lost, not moved, whatever volume it was on
+        let t = book.begin("r");
+        assert_eq!(book.install("r", t, Some(1), "last"), Ok(Some("no volume known")));
+        assert_eq!(book.observe("r", book.generation("r"), GONE), (Seen::Lost, Some("last")));
+    }
+
+    #[test]
+    fn a_look_says_whether_the_folder_is_there_and_where() {
+        let dir = tempfile::tempdir().unwrap();
+        let there = look(dir.path());
+        assert!(there.reachable);
+        assert_eq!(there.volume, volume_of(dir.path()));
+        assert_eq!(look(dir.path()), there, "the same folder twice is the same answer");
+        #[cfg(unix)]
+        assert!(there.volume.is_some());
+        let file = dir.path().join("f");
+        std::fs::write(&file, b"x").unwrap();
+        for not_a_folder in [file, dir.path().join("missing")] {
+            assert_eq!(look(&not_a_folder), GONE, "{}", not_a_folder.display());
+        }
+        assert_eq!(volume_of(&dir.path().join("missing")), None);
+    }
+
     /// The three ways a result can come back to a root that has moved on.
     #[test]
     fn the_book_drops_what_was_overtaken() {
@@ -415,7 +560,7 @@ mod tests {
 
         // a start, alone: installed
         let t = book.begin("r");
-        assert_eq!(book.install("r", t, "first"), Ok(None));
+        assert_eq!(book.install("r", t, None, "first"), Ok(None));
         assert_eq!(book.installed("r"), Some(t));
 
         // watch -> manual -> watch while the first start is still registering: the old
@@ -423,9 +568,9 @@ mod tests {
         let old = book.begin("r");
         assert_eq!(book.stop("r"), Some("first"), "handed back, to be dropped outside the lock"); // switched to manual
         let new = book.begin("r"); // and back to watch
-        assert_eq!(book.install("r", new, "new"), Ok(None));
+        assert_eq!(book.install("r", new, None, "new"), Ok(None));
         assert_eq!(
-            book.install("r", old, "late"),
+            book.install("r", old, None, "late"),
             Err("late"),
             "a late success does not replace the newer watcher"
         );
@@ -441,18 +586,18 @@ mod tests {
         assert_eq!(book.stop("r"), Some("new"));
         assert!(!book.is_live("r", starting) && !book.is_live("r", new));
         let t = book.begin("r");
-        assert_eq!(book.install("r", t, "again"), Ok(None));
+        assert_eq!(book.install("r", t, None, "again"), Ok(None));
 
         // a look saw the folder gone, then a start installed a watcher before the look came
         // back: the look is old, it stops nothing and marks nothing
         let since = book.generation("r");
         let t = book.begin("r");
         assert_eq!(
-            book.install("r", t, "replacement"),
+            book.install("r", t, None, "replacement"),
             Ok(Some("again")),
             "the one it replaces comes back"
         );
-        assert_eq!(book.observe("r", since, false), (Seen::Unchanged, None));
+        assert_eq!(book.observe("r", since, GONE), (Seen::Unchanged, None));
         assert_eq!(book.installed("r"), Some(t), "the replacement stays");
         assert!(!book.is_lost("r"));
 
@@ -460,15 +605,15 @@ mod tests {
         // counts, and the start that comes back afterwards is dropped with its dead watcher
         let t = book.begin("r");
         let since = book.generation("r");
-        assert_eq!(book.observe("r", since, false), (Seen::Lost, Some("replacement")));
+        assert_eq!(book.observe("r", since, GONE), (Seen::Lost, Some("replacement")));
         assert_eq!(book.installed("r"), None, "stopped in the same step");
-        assert_eq!(book.install("r", t, "dead on arrival"), Err("dead on arrival"));
+        assert_eq!(book.install("r", t, None, "dead on arrival"), Err("dead on arrival"));
         // back again: the caller starts a watcher, which settles the mark
         let since = book.generation("r");
-        assert_eq!(book.observe("r", since, true), (Seen::Back, None));
+        assert_eq!(book.observe("r", since, THERE), (Seen::Back, None));
         let t = book.begin("r");
-        assert_eq!(book.install("r", t, "back"), Ok(None));
-        assert_eq!(book.observe("r", book.generation("r"), true), (Seen::Unchanged, None));
+        assert_eq!(book.install("r", t, None, "back"), Ok(None));
+        assert_eq!(book.observe("r", book.generation("r"), THERE), (Seen::Unchanged, None));
 
         // a start that finds the folder missing marks the root lost, unless it was overtaken
         let old = book.begin("r");
@@ -493,7 +638,7 @@ mod tests {
             root_gone,
         };
         let old = book.begin("r");
-        assert!(book.install("r", old, ()).is_ok());
+        assert!(book.install("r", old, None, ()).is_ok());
         let _ = book.stop("r");
         let now = book.begin("r");
 
@@ -508,7 +653,7 @@ mod tests {
             Verdict::Replace,
             "a new watcher is caught up anyway"
         );
-        assert!(book.install("r", now, ()).is_ok());
+        assert!(book.install("r", now, None, ()).is_ok());
         assert_eq!(book.verdict(&ev(now, false, true)), Verdict::Replace);
         // a replaced one is not
         assert_eq!(book.verdict(&ev(old, true, false)), Verdict::Ignore);
@@ -542,7 +687,7 @@ mod tests {
 
     #[test]
     fn a_batch_says_when_events_were_lost_or_the_root_went_away() {
-        use notify::event::{Flag, RemoveKind, RenameMode};
+        use notify::event::{AccessKind, AccessMode, Flag, RemoveKind, RenameMode};
         use notify::Event;
         let root = Path::new("/lib");
         let ev = |kind: EventKind, paths: &[&str]| paths.iter().fold(Event::new(kind), |e, p| e.add_path(PathBuf::from(p)));
@@ -556,6 +701,14 @@ mod tests {
         ]);
         assert_eq!(paths, [PathBuf::from("/lib/A"), "/lib/B".into(), "/lib/C".into()]);
         assert!(!missed && !gone, "a folder below the root is an ordinary change");
+
+        // somebody looked: opening, reading or closing is no change, whatever it is on
+        let (paths, missed, gone) = run(vec![
+            ev(EventKind::Access(AccessKind::Open(AccessMode::Any)), &["/lib"]),
+            ev(EventKind::Access(AccessKind::Read), &["/lib/A/a.stl"]),
+            ev(EventKind::Access(AccessKind::Close(AccessMode::Write)), &["/lib/A/a.stl"]),
+        ]);
+        assert!(paths.is_empty() && !missed && !gone);
 
         // the queue overflowed: an event without a path that says "read everything"
         let (paths, missed, gone) = run(vec![Event::new(EventKind::Other).set_flag(Flag::Rescan)]);
@@ -573,6 +726,39 @@ mod tests {
         // a change of the root that leaves it where it is (its own metadata) is not that
         let (_, _, gone) = run(vec![ev(EventKind::Modify(ModifyKind::Any), &["/lib"])]);
         assert!(!gone);
+    }
+
+    /// Reading a watched folder is not a change. inotify reports every folder that is opened,
+    /// and a scan opens them all: if that counted, every scan would set off the next one.
+    #[test]
+    fn reading_the_folder_reports_nothing() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::create_dir_all(dir.path().join("P/sub")).unwrap();
+        std::fs::write(dir.path().join("P/part.stl"), b"x").unwrap();
+        let (tx, rx) = mpsc::channel();
+        let _w = RootWatcher::start("r1".into(), 7, dir.path(), Duration::from_millis(200), tx).unwrap();
+        std::thread::sleep(Duration::from_millis(300));
+        // what a scan does: list every folder, read a file
+        fn walk(dir: &Path) {
+            for entry in std::fs::read_dir(dir).unwrap().flatten() {
+                if entry.path().is_dir() {
+                    walk(&entry.path());
+                } else {
+                    let _ = std::fs::read(entry.path());
+                }
+            }
+        }
+        walk(dir.path());
+        let heard = rx.recv_timeout(Duration::from_millis(1500));
+        assert!(heard.is_err(), "reading was reported as a change: {heard:?}");
+        // and a real change still is one
+        std::fs::write(dir.path().join("P/sub/new.stl"), b"y").unwrap();
+        let ev = rx.recv_timeout(Duration::from_secs(5)).expect("a change is reported");
+        assert!(
+            ev.paths.iter().any(|p| p.ends_with("new.stl") || p.ends_with("sub")),
+            "{:?}",
+            ev.paths
+        );
     }
 
     /// inotify reports the watched folder's own removal; that is the one place the watcher's

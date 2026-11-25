@@ -1063,8 +1063,10 @@ impl Engine {
     }
 
     pub fn set_root_mode(&mut self, id: &str, mode: SyncMode, poll_interval_secs: Option<u64>) -> Result<LibraryRoot> {
-        // "cannot be watched" belongs to the watcher of the old mode; a new one says so again
-        let note = self.watch_errors.remove(id);
+        // "cannot be watched" belongs to the watcher of the old mode; a new one says so again.
+        // A call that leaves the mode as it is (another poll interval) changes no watcher.
+        let stays = self.roots.get(id).is_some_and(|r| r.mode == mode);
+        let note = if stays { None } else { self.watch_errors.remove(id) };
         self.roots.update(id, |r| {
             if note.is_some() && r.last_error == note {
                 r.last_error = None;
@@ -1176,9 +1178,11 @@ impl Engine {
             return Err(self.keep_offline(id, root.path.clone(), message));
         }
         // A share that is not mounted leaves its mount point behind: a folder that exists and
-        // is empty. A scan the app started by itself does not take that for "every project was
-        // deleted"; the projects stay until the user rescans, which says so.
-        let automatic = matches!(job.trigger.as_str(), "startup" | "resync" | "catchup");
+        // is empty. No scan the app runs by itself takes that for "every project was deleted":
+        // not the ones at start or after a missing folder, and not the ones a watcher or the
+        // poll timer sets off either (a watcher can outlive the share it was started on and
+        // report from there). The projects stay until the user rescans, which says so.
+        let automatic = job.trigger != "manual";
         if automatic && outcome.projects.is_empty() && self.index.count(Some(id))?.0 > 0 && dir_is_empty(&root.path) {
             let message = format!(
                 "folder is empty: {} (a share that is not connected?); rescan it if the projects are gone",

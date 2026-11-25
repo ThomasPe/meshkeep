@@ -367,11 +367,21 @@ describe('Meshkeep (library changed outside the app)', () => {
         const now = await list();
         return now.some((p) => p.rel_path === 'Gridfinity/Baseplates late') && !now.some((p) => p.id === old!.id);
       }, { timeout: 20000, timeoutMsg: 'the folder was not read when its watcher started' });
-      expect((await roots()).find((r) => r.id === rootId)?.last_scan?.trigger).toBe('catchup');
+      // The rename happened before the watcher started, so no file event can have told the app:
+      // the list above is the proof of the catch-up. Which scan ran last is not asserted; the
+      // root is watched now, and any later file event in the fixture makes that a watch scan.
+
+      // Setting watch mode again (another poll interval) leaves the running watcher alone:
+      // a folder created right after is still reported, and by a file event.
+      await browser.tauri.execute(({ core }, id) => core.invoke('set_root_mode', { id, mode: 'watch', pollIntervalSecs: 120 }), rootId);
+      fs.mkdirSync(path.join(fixture(), 'Kept watching'));
+      fs.writeFileSync(path.join(fixture(), 'Kept watching', 'kept.stl'), 'solid kept\nendsolid kept\n');
+      await browser.waitUntil(async () => (await list()).some((p) => p.rel_path === 'Kept watching'), { timeout: 20000, interval: 500, timeoutMsg: 'the watcher did not survive a second switch to watch mode' });
     } finally {
       // back to a root that is scanned on request only, with the fixture and the index as they were
       await browser.tauri.execute(({ core }, id) => core.invoke('set_root_mode', { id, mode: 'manual' }), rootId);
       fs.renameSync(to, from);
+      fs.rmSync(path.join(fixture(), 'Kept watching'), { recursive: true, force: true });
       await browser.tauri.execute(({ core }, id) => core.invoke('scan_root', { id }), rootId);
     }
     expect((await roots()).find((r) => r.id === rootId)?.mode).toBe('manual');
